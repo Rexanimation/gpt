@@ -31,11 +31,18 @@ const app = express();
 /* using middlewares */
 
 app.use(cors({
-
-    origin: 'http://localhost:5173',
-
-    credentials: true
-
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (
+            origin.includes("localhost") || 
+            origin.includes("127.0.0.1") || 
+            origin.includes("onrender.com")
+        ) {
+            return callback(null, true);
+        }
+        callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true
 }))
 
 app.use(express.json());

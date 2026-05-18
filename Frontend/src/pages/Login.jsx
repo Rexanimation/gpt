@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link,useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { API_URL } from '../config';
 
 
 const Login = () => {
@@ -21,7 +22,7 @@ const Login = () => {
 
         console.log(form);
 
-        axios.post("http://localhost:3000/api/auth/login", {
+        axios.post(`${API_URL}/api/auth/login`, {
             email: form.email,
             password: form.password
         },

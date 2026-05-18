@@ -9,6 +9,7 @@ import '../components/chat/ChatLayout.css';
 import { fakeAIReply } from '../components/chat/aiClient.js';
 import { useDispatch, useSelector } from 'react-redux';
 import axios from 'axios';
+import { API_URL } from '../config';
 import {
   ensureInitialChat,
   startNewChat,
@@ -41,7 +42,7 @@ const Home = () => {
     if (!title) return
 
     try {
-      const response = await axios.post("http://localhost:3000/api/chat", {
+      const response = await axios.post(`${API_URL}/api/chat`, {
         title
       }, { withCredentials: true })
       getMessages(response.data.chat._id);
@@ -56,7 +57,7 @@ const Home = () => {
   useEffect(() => {
 
     // Fetch existing chats — redirect to login if not authenticated
-    axios.get("http://localhost:3000/api/chat", { withCredentials: true })
+    axios.get(`${API_URL}/api/chat`, { withCredentials: true })
       .then(response => {
         dispatch(setChats(response.data.chats.reverse()));
       })
@@ -64,7 +65,8 @@ const Home = () => {
         if (err?.response?.status === 401) navigate('/login');
       });
 
-    const tempSocket = io("http://localhost:3000", {
+    const tempSocket = io(API_URL || undefined, {
+      path: "/socket.io/",
       withCredentials: true,
     });
 
@@ -129,7 +131,7 @@ const Home = () => {
 
   const getMessages = async (chatId) => {
 
-   const response = await  axios.get(`http://localhost:3000/api/chat/messages/${chatId}`, { withCredentials: true })
+   const response = await  axios.get(`${API_URL}/api/chat/messages/${chatId}`, { withCredentials: true })
 
    console.log("Fetched messages:", response.data.messages);
 

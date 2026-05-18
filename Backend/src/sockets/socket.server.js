@@ -11,7 +11,17 @@ function initSocketServer(httpServer) {
 
     const io = new Server(httpServer, {
         cors: {
-            origin: "http://localhost:5173",
+            origin: function (origin, callback) {
+                if (!origin) return callback(null, true);
+                if (
+                    origin.includes("localhost") || 
+                    origin.includes("127.0.0.1") || 
+                    origin.includes("onrender.com")
+                ) {
+                    return callback(null, true);
+                }
+                callback(new Error('Not allowed by CORS'));
+            },
             allowedHeaders: [ "Content-Type", "Authorization" ],
             credentials: true
         }
