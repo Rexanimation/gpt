@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { io } from "socket.io-client";
+import { useNavigate } from 'react-router-dom';
 import ChatMobileBar from '../components/chat/ChatMobileBar.jsx';
 import ChatSidebar from '../components/chat/ChatSidebar.jsx';
 import ChatMessages from '../components/chat/ChatMessages.jsx';
@@ -22,6 +23,7 @@ import {
 
 const Home = () => {
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   const chats = useSelector(state => state.chat.chats);
   const activeChatId = useSelector(state => state.chat.activeChatId);
   const input = useSelector(state => state.chat.input);
@@ -31,57 +33,65 @@ const Home = () => {
 
   const activeChat = chats.find(c => c.id === activeChatId) || null;
 
-  const [ messages, setMessages ] = useState([
-    // {
-    //   type: 'user',
-    //   content: 'Hello, how can I help you today?'
-    // },
-    // {
-    //   type: 'ai',
-    //   content: 'Hi there! I need assistance with my account.'
-    // }
-  ]);
+  const [ messages, setMessages ] = useState([]);
 
   const handleNewChat = async () => {
-    // Prompt user for title of new chat, fallback to 'New Chat'
     let title = window.prompt('Enter a title for the new chat:', '');
     if (title) title = title.trim();
     if (!title) return
 
-    const response = await axios.post("https://gpt-0fyy.onrender.com/api/chat", {
-      title
-    }, {
-      withCredentials: true
-    })
-    getMessages(response.data.chat._id);
-    dispatch(startNewChat(response.data.chat));
-    setSidebarOpen(false);
+    try {
+      const response = await axios.post("http://localhost:3000/api/chat", {
+        title
+      }, { withCredentials: true })
+      getMessages(response.data.chat._id);
+      dispatch(startNewChat(response.data.chat));
+      setSidebarOpen(false);
+    } catch (err) {
+      if (err?.response?.status === 401) navigate('/login');
+    }
   }
 
-  // Ensure at least one chat exists initially
+  // Load chats + connect socket on mount
   useEffect(() => {
 
-    axios.get("https://gpt-0fyy.onrender.com/api/chat", { withCredentials: true })
+    // Fetch existing chats — redirect to login if not authenticated
+    axios.get("http://localhost:3000/api/chat", { withCredentials: true })
       .then(response => {
         dispatch(setChats(response.data.chats.reverse()));
       })
+      .catch(err => {
+        if (err?.response?.status === 401) navigate('/login');
+      });
 
-    const tempSocket = io("https://gpt-0fyy.onrender.com", {
+    const tempSocket = io("http://localhost:3000", {
       withCredentials: true,
-    })
+    });
 
     tempSocket.on("ai-response", (messagePayload) => {
       console.log("Received AI response:", messagePayload);
-
       setMessages((prevMessages) => [ ...prevMessages, {
         type: 'ai',
         content: messagePayload.content
-      } ]);
-
+      }]);
       dispatch(sendingFinished());
     });
 
+    // Handle server-side errors gracefully
+    tempSocket.on("ai-error", (err) => {
+      console.error("AI error:", err.message);
+      dispatch(sendingFinished());
+    });
+
+    tempSocket.on("connect_error", (err) => {
+      console.error("Socket connect error:", err.message);
+      // If auth error → redirect to login
+      if (err.message?.includes("Authentication")) navigate('/login');
+    });
+
     setSocket(tempSocket);
+
+    return () => tempSocket.disconnect(); // cleanup on unmount
 
   }, []);
 
@@ -119,7 +129,7 @@ const Home = () => {
 
   const getMessages = async (chatId) => {
 
-   const response = await  axios.get(`https://gpt-0fyy.onrender.com/api/chat/messages/${chatId}`, { withCredentials: true })
+   const response = await  axios.get(`http://localhost:3000/api/chat/messages/${chatId}`, { withCredentials: true })
 
    console.log("Fetched messages:", response.data.messages);
 

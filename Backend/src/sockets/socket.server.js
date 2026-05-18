@@ -17,120 +17,141 @@ function initSocketServer(httpServer) {
         }
     })
 
+    // ─── Auth middleware ────────────────────────────────────────────────────────
     io.use(async (socket, next) => {
 
         const cookies = cookie.parse(socket.handshake.headers?.cookie || "");
 
         if (!cookies.token) {
-            next(new Error("Authentication error: No token provided"));
+            return next(new Error("Authentication error: No token provided"));
         }
 
         try {
-
             const decoded = jwt.verify(cookies.token, process.env.JWT_SECRET);
-
             const user = await userModel.findById(decoded.id);
-
-            socket.user = user
-
-            next()
-
+            if (!user) return next(new Error("Authentication error: User not found"));
+            socket.user = user;
+            next();
         } catch (err) {
             next(new Error("Authentication error: Invalid token"));
         }
 
     })
 
+    // ─── Connection handler ─────────────────────────────────────────────────────
     io.on("connection", (socket) => {
+
         socket.on("ai-message", async (messagePayload) => {
-            /* messagePayload = { chat:chatId,content:message text } */
-            const [ message, vectors ] = await Promise.all([
-                messageModel.create({
-                    chat: messagePayload.chat,
-                    user: socket.user._id,
-                    content: messagePayload.content,
-                    role: "user"
-                }),
-                aiService.generateVector(messagePayload.content),
-            ])
+            /* messagePayload = { chat: chatId, content: message text } */
 
-            await createMemory({
-                vectors,
-                messageId: message._id,
-                metadata: {
-                    chat: messagePayload.chat,
-                    user: socket.user._id,
-                    text: messagePayload.content
+            try {
+                const userId   = socket.user._id.toString();
+                const chatId   = messagePayload.chat.toString();
+                const userText = messagePayload.content;
+
+                // 1️⃣ Save user message to DB + generate embedding (parallel with safe catch)
+                const [ message, vectors ] = await Promise.all([
+                    messageModel.create({
+                        chat: chatId,
+                        user: userId,
+                        content: userText,
+                        role: "user"
+                    }),
+                    aiService.generateVector(userText).catch(err => {
+                        console.error("[HF Inference] Error generating vector:", err.message);
+                        return null; // fallback gracefully
+                    }),
+                ])
+
+                // 2️⃣ Store user message embedding in Pinecone (only if embedding generation succeeded)
+                if (vectors) {
+                    await createMemory({
+                        vectors,
+                        messageId: message._id,
+                        metadata: {
+                            chat: chatId,          // string ✓
+                            user: userId,          // string ✓
+                            text: userText,
+                            role: "user"
+                        }
+                    })
                 }
-            })
 
+                // 3️⃣ Search long-term memory + fetch recent chat history (parallel)
+                const [ memory, chatHistory ] = await Promise.all([
+                    vectors
+                        ? queryMemory({
+                            queryVector: vectors,
+                            limit: 5,
+                            metadata: { user: { "$eq": userId } }   // Pinecone filter syntax
+                          })
+                        : Promise.resolve([]),
+                    messageModel
+                        .find({ chat: chatId })
+                        .sort({ createdAt: -1 })
+                        .limit(20)
+                        .lean()
+                        .then(msgs => msgs.reverse())
+                ])
 
-            const [ memory, chatHistory ] = await Promise.all([
-
-                queryMemory({
-                    queryVector: vectors,
-                    limit: 3,
-                    metadata: {
-                        user: socket.user._id
-                    }
-                }),
-
-                messageModel.find({
-                    chat: messagePayload.chat
-                }).sort({ createdAt: -1 }).limit(20).lean().then(messages => messages.reverse())
-            ])
-
-            const stm = chatHistory.map(item => {
-                return {
-                    role: item.role,
+                // 4️⃣ Build short-term memory (recent chat history — Gemini → Groq format handled in ai.service)
+                const stm = chatHistory.map(item => ({
+                    role: item.role,           // "user" | "model" (converted in ai.service)
                     parts: [ { text: item.content } ]
-                }
-            })
+                }))
 
-            const ltm = [
-                {
-                    role: "user",
-                    parts: [ {
-                        text: `
+                // 5️⃣ Build long-term memory context from Pinecone results (only if memory is valid array)
+                const ltm = (Array.isArray(memory) && memory.length > 0)
+                    ? [{
+                        role: "user",
+                        parts: [{
+                            text: `[Previous conversation context — use for reference only]\n${
+                                memory.map(m => `• ${m.metadata.role === "model" ? "AI" : "User"}: ${m.metadata.text}`).join("\n")
+                            }`
+                        }]
+                    }]
+                    : []   // skip if no memory yet
 
-                        these are some previous messages from the chat, use them to generate a response
+                // 6️⃣ Generate AI response
+                const response = await aiService.generateResponse([ ...ltm, ...stm ])
 
-                        ${memory.map(item => item.metadata.text).join("\n")}
-                        
-                        ` } ]
-                }
-            ]
-
-
-            const response = await aiService.generateResponse([ ...ltm, ...stm ])
-
-
-
-
-            socket.emit('ai-response', {
-                content: response,
-                chat: messagePayload.chat
-            })
-
-            const [ responseMessage, responseVectors ] = await Promise.all([
-                messageModel.create({
-                    chat: messagePayload.chat,
-                    user: socket.user._id,
+                // 7️⃣ Send response to frontend immediately
+                socket.emit("ai-response", {
                     content: response,
-                    role: "model"
-                }),
-                aiService.generateVector(response)
-            ])
+                    chat: chatId
+                })
 
-            await createMemory({
-                vectors: responseVectors,
-                messageId: responseMessage._id,
-                metadata: {
-                    chat: messagePayload.chat,
-                    user: socket.user._id,
-                    text: response
+                // 8️⃣ Save AI response to DB + store its embedding in Pinecone (parallel with safe catch)
+                const [ responseMessage, responseVectors ] = await Promise.all([
+                    messageModel.create({
+                        chat: chatId,
+                        user: userId,
+                        content: response,
+                        role: "model"
+                    }),
+                    aiService.generateVector(response).catch(err => {
+                        console.error("[HF Inference] Error generating vector:", err.message);
+                        return null; // fallback gracefully
+                    })
+                ])
+
+                if (responseVectors) {
+                    await createMemory({
+                        vectors: responseVectors,
+                        messageId: responseMessage._id,
+                        metadata: {
+                            chat: chatId,          // string ✓
+                            user: userId,          // string ✓
+                            text: response,
+                            role: "model"
+                        }
+                    })
                 }
-            })
+
+            } catch (err) {
+                console.error("[socket] ai-message error:", err.message);
+                socket.emit("ai-error", { message: "Something went wrong. Please try again." });
+            }
 
         })
 
