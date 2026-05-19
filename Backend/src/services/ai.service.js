@@ -27,7 +27,6 @@ const SYSTEM_PROMPT = `
   <reasoning>Think step-by-step internally; share only the useful outcome. Show calculations or assumptions when it helps the user.</reasoning>
   <structure>Start with a quick answer or summary. Follow with steps, examples, or code. End with a brief "Next steps" when relevant.</structure>
   <code>Provide runnable, minimal code. Include file names when relevant. Explain key decisions with one-line comments. Prefer modern best practices.</code>
-  <tools>You have access to real-time tools. Use them when needed for current information, weather, time, web searches, stock data, and stock market news.</tools>
 </capabilities>
 
 <constraints>
@@ -36,7 +35,7 @@ const SYSTEM_PROMPT = `
   <styleLimits>No purple prose. No excessive emojis. No walls of text unless explicitly requested.</styleLimits>
 </constraints>
 
-<identity>You are "Aurora". Refer to yourself as Aurora when self-identifying. Do not claim real-world abilities or access you do not have.</identity>
+<identity>You are "Aurora". Refer to yourself as Aurora when self-identifying.</identity>
 `;
 
 // ─── Helpers to convert message format ──────────────────────────────────────
@@ -56,69 +55,124 @@ function toGroqMessages(contents) {
     });
 }
 
-// ─── Chat completion with tool calling ───────────────────────────────────────
-async function generateResponse(content) {
-    let messages = [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...toGroqMessages(content)
-    ];
+// ─── Chat completion with fallback (no tool calling) ────────────────────────
+async function generateResponseWithoutTools(content) {
+    try {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...toGroqMessages(content)
+        ];
 
-    const maxIterations = 5;
-    let iteration = 0;
-
-    while (iteration < maxIterations) {
         const completion = await groq.chat.completions.create({
             model: "llama-3.3-70b-versatile",
             messages,
-            tools: TOOLS,
             temperature: 0.7,
             max_tokens: 2048
         });
 
-        const responseMessage = completion.choices[0].message;
-
-        if (!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) {
-            return responseMessage.content;
-        }
-
-        messages.push(responseMessage);
-
-        for (const toolCall of responseMessage.tool_calls) {
-            const functionName = toolCall.function.name;
-            const functionArgs = JSON.parse(toolCall.function.arguments);
-            
-            const toolResult = await executeTool(functionName, functionArgs);
-            
-            messages.push({
-                tool_call_id: toolCall.id,
-                role: "tool",
-                name: functionName,
-                content: JSON.stringify(toolResult)
-            });
-        }
-
-        iteration++;
+        return completion.choices[0].message.content;
+    } catch (error) {
+        console.error("[AI] Error in generateResponseWithoutTools:", error.message);
+        throw error;
     }
+}
 
-    return "I'm sorry, I couldn't complete your request after multiple attempts.";
+// ─── Chat completion with tool calling (primary) ────────────────────────────
+async function generateResponseWithTools(content) {
+    try {
+        let messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...toGroqMessages(content)
+        ];
+
+        const maxIterations = 3;
+        let iteration = 0;
+
+        while (iteration < maxIterations) {
+            console.log("[AI] Tool calling iteration:", iteration + 1);
+            
+            const completion = await groq.chat.completions.create({
+                model: "llama-3.3-70b-versatile",
+                messages,
+                tools: TOOLS,
+                temperature: 0.7,
+                max_tokens: 2048
+            });
+
+            const responseMessage = completion.choices[0].message;
+
+            if (!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) {
+                return responseMessage.content;
+            }
+
+            messages.push(responseMessage);
+
+            for (const toolCall of responseMessage.tool_calls) {
+                const functionName = toolCall.function.name;
+                console.log("[AI] Executing tool:", functionName);
+                
+                try {
+                    const functionArgs = JSON.parse(toolCall.function.arguments);
+                    const toolResult = await executeTool(functionName, functionArgs);
+                    
+                    messages.push({
+                        tool_call_id: toolCall.id,
+                        role: "tool",
+                        name: functionName,
+                        content: JSON.stringify(toolResult)
+                    });
+                } catch (toolError) {
+                    console.error("[AI] Tool execution error:", toolError.message);
+                    messages.push({
+                        tool_call_id: toolCall.id,
+                        role: "tool",
+                        name: functionName,
+                        content: JSON.stringify({ error: toolError.message })
+                    });
+                }
+            }
+
+            iteration++;
+        }
+
+        return "I'm sorry, I couldn't complete your request after multiple attempts.";
+    } catch (error) {
+        console.error("[AI] Error in generateResponseWithTools:", error.message);
+        throw error;
+    }
+}
+
+// ─── Main generateResponse with fallback ─────────────────────────────────────
+async function generateResponse(content) {
+    try {
+        return await generateResponseWithTools(content);
+    } catch (error) {
+        console.warn("[AI] Tool calling failed, falling back to regular response:", error.message);
+        return await generateResponseWithoutTools(content);
+    }
 }
 
 // ─── Embeddings (768-dim — matches existing Pinecone index) ─────────────────
 // Model: sentence-transformers/all-mpnet-base-v2  →  768 dimensions
 async function generateVector(content) {
-    const text = typeof content === "string"
-        ? content
-        : content.map(c =>
-            Array.isArray(c.parts) ? c.parts.map(p => p.text).join(" ") : (c.content || "")
-          ).join(" ");
+    try {
+        const text = typeof content === "string"
+            ? content
+            : content.map(c =>
+                Array.isArray(c.parts) ? c.parts.map(p => p.text).join(" ") : (c.content || "")
+              ).join(" ");
 
-    const output = await hf.featureExtraction({
-        model: "sentence-transformers/all-mpnet-base-v2",
-        inputs: text
-    });
+        const output = await hf.featureExtraction({
+            model: "sentence-transformers/all-mpnet-base-v2",
+            inputs: text
+        });
 
-    const vector = Array.isArray(output[0]) ? output[0] : output;
-    return vector;
+        const vector = Array.isArray(output[0]) ? output[0] : output;
+        return vector;
+    } catch (error) {
+        console.error("[HF Inference] Error generating vector:", error.message);
+        throw error;
+    }
 }
 
 module.exports = { generateResponse, generateVector };
