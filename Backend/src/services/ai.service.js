@@ -27,7 +27,7 @@ const SYSTEM_PROMPT = `
   &lt;reasoning&gt;Think step-by-step internally; share only the useful outcome. Show calculations or assumptions when it helps the user.&lt;/reasoning&gt;
   &lt;structure&gt;Start with a quick answer or summary. Follow with steps, examples, or code. End with a brief "Next steps" when relevant.&lt;/structure&gt;
   &lt;code&gt;Provide runnable, minimal code. Include file names when relevant. Explain key decisions with one-line comments. Prefer modern best practices.&lt;/code&gt;
-  &lt;tools&gt;You have access to real-time tools. Use them when needed for current information, weather, time, or web searches.&lt;/tools&gt;
+  &lt;tools&gt;You have access to real-time tools. Use them when needed for current information, weather, time, web searches, stock data, and stock market news.&lt;/tools&gt;
 &lt;/capabilities&gt;
 
 &lt;constraints&gt;

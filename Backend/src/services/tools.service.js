@@ -1,4 +1,3 @@
-
 const axios = require('axios');
 
 const TOOLS = [
@@ -51,6 +50,40 @@ const TOOLS = [
                 required: ["query"]
             }
         }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_stock_data",
+            description: "Get current stock data including price, open, close, high, low, and volume",
+            parameters: {
+                type: "object",
+                properties: {
+                    symbol: {
+                        type: "string",
+                        description: "Stock ticker symbol, e.g., 'AAPL' for Apple, 'GOOGL' for Google"
+                    }
+                },
+                required: ["symbol"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_stock_news",
+            description: "Get recent news articles related to a stock or company",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: {
+                        type: "string",
+                        description: "Stock symbol or company name, e.g., 'AAPL' or 'Apple Inc'"
+                    }
+                },
+                required: ["query"]
+            }
+        }
     }
 ];
 
@@ -62,6 +95,10 @@ async function executeTool(toolName, args) {
             return await getCurrentTime(args.timezone);
         case "search_web":
             return await searchWeb(args.query);
+        case "get_stock_data":
+            return await getStockData(args.symbol);
+        case "get_stock_news":
+            return await getStockNews(args.query);
         default:
             throw new Error(`Unknown tool: ${toolName}`);
     }
@@ -113,6 +150,84 @@ async function searchWeb(query) {
         };
     } catch (error) {
         return { error: 'Could not perform web search' };
+    }
+}
+
+async function getStockData(symbol) {
+    try {
+        const response = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol.toUpperCase()}`, {
+            params: {
+                interval: '1d',
+                range: '5d'
+            }
+        });
+        const result = response.data.chart.result[0];
+        const meta = result.meta;
+        const timestamps = result.timestamp;
+        const indicators = result.indicators.quote[0];
+        
+        const currentPrice = meta.regularMarketPrice;
+        const previousClose = meta.previousClose;
+        const change = currentPrice - previousClose;
+        const changePercent = (change / previousClose) * 100;
+        
+        const historicalData = timestamps.map((ts, i) => ({
+            date: new Date(ts * 1000).toLocaleDateString(),
+            open: indicators.open[i],
+            high: indicators.high[i],
+            low: indicators.low[i],
+            close: indicators.close[i],
+            volume: indicators.volume[i]
+        })).filter(d => d.close);
+
+        return {
+            symbol: meta.symbol,
+            company_name: meta.shortName,
+            currency: meta.currency,
+            current_price: currentPrice,
+            previous_close: previousClose,
+            change: change.toFixed(2),
+            change_percent: changePercent.toFixed(2) + '%',
+            market_open: meta.tradingPeriods ? 'Open' : 'Closed',
+            historical_data: historicalData.slice(-5),
+            chart_data_url: `https://finance.yahoo.com/chart/${symbol.toUpperCase()}`,
+            note: 'For detailed charts, visit the Yahoo Finance URL provided'
+        };
+    } catch (error) {
+        return { 
+            error: 'Could not fetch stock data for ' + symbol,
+            suggestion: 'Please check if the stock symbol is correct (e.g., AAPL, GOOGL, MSFT)'
+        };
+    }
+}
+
+async function getStockNews(query) {
+    try {
+        const searchQuery = `${query} stock market news`;
+        const response = await axios.get('https://api.duckduckgo.com/', {
+            params: {
+                q: searchQuery,
+                format: 'json',
+                no_html: 1,
+                skip_disambig: 1
+            }
+        });
+        const data = response.data;
+        
+        const newsFromWeb = await searchWeb(searchQuery);
+        
+        return {
+            query: query,
+            summary: data.Abstract || 'Latest news and updates for ' + query,
+            related_news: data.RelatedTopics ? data.RelatedTopics.slice(0, 8).map(t => ({
+                title: t.Text,
+                url: t.FirstURL
+            })) : [],
+            additional_info: newsFromWeb,
+            note: 'For more comprehensive news, consider searching financial news websites directly'
+        };
+    } catch (error) {
+        return { error: 'Could not fetch stock news for ' + query };
     }
 }
 
