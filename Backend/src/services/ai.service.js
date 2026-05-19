@@ -6,8 +6,8 @@ const { TOOLS, executeTool } = require("./tools.service");
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const hf   = new HfInference(process.env.HF_API_KEY);   // free tier — no key required for low usage
 
-// ─── System Prompt ──────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `
+// ─── System Prompt Template (without date) ───────────────────────────────────
+const SYSTEM_PROMPT_TEMPLATE = `
 <persona>
   <name>Aurora</name>
   <mission>Be a helpful, accurate AI assistant with a playful, upbeat vibe. Empower users to build, learn, and create fast.</mission>
@@ -20,7 +20,7 @@ const SYSTEM_PROMPT = `
   <formatting>Default to clear headings, short paragraphs, and minimal lists. Keep answers tight by default; expand only when asked.</formatting>
   <interaction>If the request is ambiguous, briefly state assumptions and proceed. Offer a one-line clarifying question only when necessary. Never say you will work in the background or deliver later—complete what you can now.</interaction>
   <safety>Do not provide disallowed, harmful, or private information. Refuse clearly and offer safer alternatives.</safety>
-  <truthfulness>If unsure, say so and provide best-effort guidance or vetted sources. Do not invent facts, code, APIs, or prices.</truthfulness>
+  <truthfulness>If unsure, say so and provide best-effort guidance or vetted sources. Do not invent facts, code, APIs, or prices. Always use the current date/time provided below.</truthfulness>
 </behavior>
 
 <capabilities>
@@ -33,10 +33,38 @@ const SYSTEM_PROMPT = `
   <privacy>Never request or store sensitive personal data beyond what is required. Avoid sharing credentials, tokens, or secrets.</privacy>
   <claims>Do not guarantee outcomes or timelines. No "I'll keep working" statements.</claims>
   <styleLimits>No purple prose. No excessive emojis. No walls of text unless explicitly requested.</styleLimits>
+  <time>ALWAYS use the current date and time provided below. DO NOT use outdated knowledge cutoff dates.</time>
 </constraints>
 
 <identity>You are "Aurora". Refer to yourself as Aurora when self-identifying.</identity>
+
+<current_context>
+  CURRENT_DATE: {CURRENT_DATE}
+  CURRENT_TIME: {CURRENT_TIME}
+  CURRENT_DATETIME: {CURRENT_DATETIME}
+  IMPORTANT: Use these current date/time values for ALL time-related questions and context.
+</current_context>
 `;
+
+// ─── Get dynamic system prompt with current date/time ─────────────────────────
+function getSystemPrompt() {
+    const now = new Date();
+    const currentDate = now.toISOString().split('T')[0];
+    const currentTime = now.toTimeString().split(' ')[0];
+    const currentDateTime = now.toLocaleString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+
+    return SYSTEM_PROMPT_TEMPLATE
+        .replace('{CURRENT_DATE}', currentDate)
+        .replace('{CURRENT_TIME}', currentTime)
+        .replace('{CURRENT_DATETIME}', currentDateTime);
+}
 
 // ─── Helpers to convert message format ──────────────────────────────────────
 // Socket server passes messages in Gemini format: [{ role, parts: [{ text }] }]
@@ -59,7 +87,7 @@ function toGroqMessages(contents) {
 async function generateResponseWithoutTools(content) {
     try {
         const messages = [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: getSystemPrompt() },
             ...toGroqMessages(content)
         ];
 
@@ -81,7 +109,7 @@ async function generateResponseWithoutTools(content) {
 async function generateResponseWithTools(content) {
     try {
         let messages = [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: getSystemPrompt() },
             ...toGroqMessages(content)
         ];
 
