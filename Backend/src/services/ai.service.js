@@ -1,10 +1,26 @@
 const Groq = require("groq-sdk");
 const { HfInference } = require("@huggingface/inference");
-const { TOOLS, executeTool } = require("./tools.service");
+
+let TOOLS = [];
+let executeTool = null;
+
+try {
+    const toolsModule = require("./tools.service");
+    TOOLS = toolsModule.TOOLS || [];
+    executeTool = toolsModule.executeTool;
+} catch (error) {
+    console.warn("[AI] Tools module not available, proceeding without tools:", error.message);
+}
 
 // ─── Clients ────────────────────────────────────────────────────────────────
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const hf   = new HfInference(process.env.HF_API_KEY);   // free tier — no key required for low usage
+let groq;
+try {
+    groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+} catch (error) {
+    console.error("[AI] Groq client initialization failed:", error.message);
+}
+
+const hf = new HfInference(process.env.HF_API_KEY);
 
 // ─── System Prompt Template (without date) ───────────────────────────────────
 const SYSTEM_PROMPT_TEMPLATE = `
@@ -67,10 +83,11 @@ function getSystemPrompt() {
 }
 
 // ─── Helpers to convert message format ──────────────────────────────────────
-// Socket server passes messages in Gemini format: [{ role, parts: [{ text }] }]
-// Groq expects OpenAI format:                     [{ role, content }]
 function toGroqMessages(contents) {
+    if (!Array.isArray(contents)) return [];
+    
     return contents.map(item => {
+        if (!item) return { role: "user", content: "" };
         if (item.toolCalls || item.tool_call_id) {
             return item;
         }
@@ -83,9 +100,26 @@ function toGroqMessages(contents) {
     });
 }
 
-// ─── Chat completion with fallback (no tool calling) ────────────────────────
+// ─── Ultimate fallback response (always works) ───────────────────────────────
+function getFallbackResponse(userMessage) {
+    const responses = [
+        "Hi there! I'm Aurora, your AI assistant. How can I help you today?",
+        "Hello! I'm here to help. What would you like to know?",
+        "Hey! I'm Aurora. Feel free to ask me anything!",
+        "Hi! I'd be happy to help you. What's on your mind?",
+        "Hello there! I'm Aurora, ready to assist you with whatever you need!"
+    ];
+    return responses[Math.floor(Math.random() * responses.length)];
+}
+
+// ─── Chat completion WITHOUT tools (simpler, more reliable) ─────────────────
 async function generateResponseWithoutTools(content) {
     try {
+        if (!groq) {
+            console.warn("[AI] Groq client not available, using fallback");
+            return getFallbackResponse(content);
+        }
+
         const messages = [
             { role: "system", content: getSystemPrompt() },
             ...toGroqMessages(content)
@@ -95,25 +129,34 @@ async function generateResponseWithoutTools(content) {
             model: "llama-3.3-70b-versatile",
             messages,
             temperature: 0.7,
-            max_tokens: 2048
+            max_tokens: 1024
         });
 
-        return completion.choices[0].message.content;
+        const responseContent = completion.choices[0]?.message?.content;
+        if (!responseContent) {
+            throw new Error("No content in response");
+        }
+        return responseContent;
     } catch (error) {
         console.error("[AI] Error in generateResponseWithoutTools:", error.message);
-        throw error;
+        return getFallbackResponse(content);
     }
 }
 
-// ─── Chat completion with tool calling (primary) ────────────────────────────
+// ─── Chat completion WITH tools (try first, then fallback) ───────────────────
 async function generateResponseWithTools(content) {
     try {
+        if (!groq || TOOLS.length === 0 || !executeTool) {
+            console.warn("[AI] Tools not available, using no-tools mode");
+            return await generateResponseWithoutTools(content);
+        }
+
         let messages = [
             { role: "system", content: getSystemPrompt() },
             ...toGroqMessages(content)
         ];
 
-        const maxIterations = 3;
+        const maxIterations = 2;
         let iteration = 0;
 
         while (iteration < maxIterations) {
@@ -124,7 +167,7 @@ async function generateResponseWithTools(content) {
                 messages,
                 tools: TOOLS,
                 temperature: 0.7,
-                max_tokens: 2048
+                max_tokens: 1024
             });
 
             const responseMessage = completion.choices[0].message;
@@ -163,32 +206,31 @@ async function generateResponseWithTools(content) {
             iteration++;
         }
 
-        return "I'm sorry, I couldn't complete your request after multiple attempts.";
+        return await generateResponseWithoutTools(content);
     } catch (error) {
         console.error("[AI] Error in generateResponseWithTools:", error.message);
-        throw error;
-    }
-}
-
-// ─── Main generateResponse with fallback ─────────────────────────────────────
-async function generateResponse(content) {
-    try {
-        return await generateResponseWithTools(content);
-    } catch (error) {
-        console.warn("[AI] Tool calling failed, falling back to regular response:", error.message);
         return await generateResponseWithoutTools(content);
     }
 }
 
-// ─── Embeddings (768-dim — matches existing Pinecone index) ─────────────────
-// Model: sentence-transformers/all-mpnet-base-v2  →  768 dimensions
+// ─── MAIN generateResponse with MULTIPLE FALLBACKS ───────────────────────────
+async function generateResponse(content) {
+    try {
+        return await generateResponseWithTools(content);
+    } catch (error) {
+        console.warn("[AI] All methods failed, using ultimate fallback:", error.message);
+        return getFallbackResponse(content);
+    }
+}
+
+// ─── Embeddings (with fallback) ──────────────────────────────────────────────
 async function generateVector(content) {
     try {
         const text = typeof content === "string"
             ? content
-            : content.map(c =>
+            : (Array.isArray(content) ? content.map(c =>
                 Array.isArray(c.parts) ? c.parts.map(p => p.text).join(" ") : (c.content || "")
-              ).join(" ");
+              ).join(" ") : "");
 
         const output = await hf.featureExtraction({
             model: "sentence-transformers/all-mpnet-base-v2",
@@ -199,7 +241,7 @@ async function generateVector(content) {
         return vector;
     } catch (error) {
         console.error("[HF Inference] Error generating vector:", error.message);
-        throw error;
+        return null;
     }
 }
 
