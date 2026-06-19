@@ -88,7 +88,7 @@ File Type: ${fileType}
 File Size: ${(fileSize / (1024 * 1024)).toFixed(2)} MB
 
 Provide a JSON response containing:
-1. "tags": An array of 4 to 6 relevant tags (like "#Sunset", "#Beach", "#Ocean", "#Nature").
+1. "tags": An array of 4 to 6 relevant tags (like "Sunset", "Beach", "Ocean", "Nature" - do NOT prepend them with the '#' symbol).
 2. "summary": A 2-3 sentence smart summary of what the file likely represents, written in a high-end SaaS tone. Use the name "Sahil AI" to describe yourself when referring to the analysis, e.g. "Sahil AI detects...".
 3. "colors": An array of 2 primary hex colors matching the theme of the file.
 4. "resolution": A typical high-quality resolution (like "4096 x 2304" for 4K image, or a suitable resolution for the file type, e.g., "1920 x 1080 (1080p)" for video).

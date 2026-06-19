@@ -388,6 +388,11 @@ const Home = () => {
     return `${gb.toFixed(2)} GB`;
   };
 
+  const cleanTag = (tag) => {
+    if (!tag) return "";
+    return tag.startsWith('#') ? tag.substring(1) : tag;
+  };
+
   const activeFileConversation = fileChats[activeAsset?._id] || [];
 
   return (
@@ -752,7 +757,7 @@ const Home = () => {
                         </div>
                         <div className="file-tags-row">
                           {file.tags && file.tags.slice(0, 3).map((tag, idx) => (
-                            <span className="file-tag-badge" key={idx}>{tag}</span>
+                            <span className="file-tag-badge" key={idx}>{cleanTag(tag)}</span>
                           ))}
                         </div>
                       </div>
@@ -814,7 +819,7 @@ const Home = () => {
                       className={`drawer-tag-chip ${checkedTags[tag] ? 'active-sparkle' : ''}`}
                       onClick={() => setCheckedTags(prev => ({ ...prev, [tag]: !prev[tag] }))}
                     >
-                      {tag}
+                      {cleanTag(tag)}
                       {checkedTags[tag] && (
                         <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />

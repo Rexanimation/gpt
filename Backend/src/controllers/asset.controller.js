@@ -9,7 +9,7 @@ const SEED_ASSETS = [
         type: "image/jpeg",
         size: 4404019,
         url: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800",
-        tags: ["#Nature", "#Sunset", "#Beach", "#Ocean", "#GoldenHour"],
+        tags: ["Nature", "Sunset", "Beach", "Ocean", "GoldenHour"],
         summary: "This image features a high-dynamic-range sunset over a tropical coastline. Sahil AI detects 98.4% landscape fidelity. The primary color palette consists of deep oranges (#FF8C00) and violets (#8A2BE2). Perfect for travel promotion or background assets. No copyrighted humans detected.",
         colors: ["#FF8C00", "#8A2BE2"],
         resolution: "4096 x 2304 (4K)"
@@ -19,7 +19,7 @@ const SEED_ASSETS = [
         type: "video/mp4",
         size: 16357785,
         url: "https://assets.mixkit.co/videos/preview/mixkit-keyboard-typing-close-up-846-large.mp4",
-        tags: ["#Demo", "#Clip", "#Video"],
+        tags: ["Demo", "Clip", "Video"],
         summary: "This video displays a product demonstration. Sahil AI detects high-fidelity user interaction flows, clean desktop workspace environments, and detailed screen recordings.",
         colors: ["#1E293B", "#0F172A"],
         resolution: "1920 x 1080 (1080p)"
@@ -29,7 +29,7 @@ const SEED_ASSETS = [
         type: "image/jpeg",
         size: 3670016,
         url: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=800",
-        tags: ["#Urban", "#Travel", "#City", "#Skyline"],
+        tags: ["Urban", "Travel", "City", "Skyline"],
         summary: "This image captures a wide-angle metropolitan skyline during twilight. Sahil AI detects complex architectural grids, high density structures, and rich ambient street lighting.",
         colors: ["#3B82F6", "#1E3A8A"],
         resolution: "3840 x 2560 (UHD)"
@@ -39,7 +39,7 @@ const SEED_ASSETS = [
         type: "image/jpeg",
         size: 2936012,
         url: "https://images.unsplash.com/photo-1516035069371-29a1b244cc32?w=800",
-        tags: ["#Gear", "#Setup", "#Camera", "#Creative"],
+        tags: ["Gear", "Setup", "Camera", "Creative"],
         summary: "This image showcases a professional camera gear layout on a dark wooden surface. Sahil AI identifies camera bodies, prime lenses, and key studio accessories.",
         colors: ["#27272A", "#18181B"],
         resolution: "3000 x 2000"
