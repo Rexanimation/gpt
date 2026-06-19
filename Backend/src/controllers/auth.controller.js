@@ -90,7 +90,38 @@ async function loginUser(req, res) {
 }
 
 
+async function getMe(req, res) {
+    try {
+        const user = req.user;
+        if (!user) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+        res.status(200).json({
+            user: {
+                email: user.email,
+                _id: user._id,
+                fullName: user.fullName
+            }
+        });
+    } catch (err) {
+        console.error("GetMe error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
+async function logoutUser(req, res) {
+    try {
+        res.clearCookie("token");
+        res.status(200).json({ message: "Logged out successfully" });
+    } catch (err) {
+        console.error("Logout error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
 module.exports = {
     registerUser,
-    loginUser
+    loginUser,
+    getMe,
+    logoutUser
 }

@@ -245,4 +245,48 @@ async function generateVector(content) {
     }
 }
 
-module.exports = { generateResponse, generateVector };
+async function analyzeAsset(fileName, fileType, fileSize) {
+    try {
+        if (!groq) {
+            throw new Error("Groq client not available");
+        }
+        
+        const systemPrompt = `You are Sahil Drive's AI File Analyzer. Analyze the file name, type, and size.
+Provide a JSON response containing:
+1. "tags": An array of 4 to 6 relevant tags (like "#Sunset", "#Beach", "#Ocean", "#Nature").
+2. "summary": A 2-3 sentence smart summary of what the file likely represents, written in a high-end SaaS tone. Use the name "Sahil AI" to describe yourself when referring to the analysis, e.g. "Sahil AI detects...".
+3. "colors": An array of 2 primary hex colors matching the theme of the file.
+4. "resolution": A typical high-quality resolution (like "4096 x 2304" for 4K image, or a suitable resolution for the file type, e.g., "1920 x 1080 (1080p)" for video).
+
+Ensure the output is STRICTLY valid JSON and nothing else. No markdown wrappers.`;
+
+        const userPrompt = `File Name: ${fileName}
+File Type: ${fileType}
+File Size: ${(fileSize / (1024 * 1024)).toFixed(2)} MB`;
+
+        const completion = await groq.chat.completions.create({
+            model: "llama-3.3-70b-versatile",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            temperature: 0.5,
+            response_format: { type: "json_object" }
+        });
+
+        const resultText = completion.choices[0]?.message?.content;
+        return JSON.parse(resultText);
+    } catch (error) {
+        console.error("[AI] analyzeAsset error:", error.message);
+        const isVideo = fileType.startsWith("video/");
+        return {
+            tags: isVideo ? ["#Demo", "#Clip", "#Video"] : ["#Image", "#Visual", "#Asset"],
+            summary: `This is a uploaded ${fileType.split("/")[1] || "file"} named ${fileName}. Sahil AI is processing its content and tags.`,
+            colors: ["#3B82F6", "#10B981"],
+            resolution: isVideo ? "1920 x 1080 (HD)" : "3840 x 2160 (4K)"
+        };
+    }
+}
+
+module.exports = { generateResponse, generateVector, analyzeAsset };
+
