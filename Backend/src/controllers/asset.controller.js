@@ -1,39 +1,7 @@
 const assetModel = require('../models/asset.model');
 const aiService = require('../services/ai.service');
-
-async function uploadAsset(req, res) {
-    try {
-        const { name, type, size, url } = req.body;
-        const user = req.user;
-
-        if (!name || !type || !size || !url) {
-            return res.status(400).json({ message: "All file fields (name, type, size, url) are required" });
-        }
-
-        // Call Groq Llama to generate the analysis (tags, summary, colors, resolution)
-        const analysis = await aiService.analyzeAsset(name, type, size);
-
-        const asset = await assetModel.create({
-            user: user._id,
-            name,
-            type,
-            size,
-            url,
-            tags: analysis.tags || [],
-            summary: analysis.summary || "",
-            colors: analysis.colors || [],
-            resolution: analysis.resolution || "Unknown"
-        });
-
-        res.status(201).json({
-            message: "Asset uploaded and analyzed successfully",
-            asset
-        });
-    } catch (err) {
-        console.error("Upload Asset error:", err);
-        res.status(500).json({ message: "Internal server error" });
-    }
-}
+const fs = require('fs');
+const path = require('path');
 
 const SEED_ASSETS = [
     {
@@ -78,6 +46,46 @@ const SEED_ASSETS = [
     }
 ];
 
+async function uploadAsset(req, res) {
+    try {
+        const user = req.user;
+        
+        if (!req.file) {
+            return res.status(400).json({ message: "No file was uploaded" });
+        }
+
+        const name = req.file.originalname;
+        const type = req.file.mimetype;
+        const size = req.file.size;
+        
+        // Relative path exposed statically
+        const url = `/uploads/${req.file.filename}`;
+
+        // Call Gemini to generate tags, summary, dominant colors, and resolution
+        const analysis = await aiService.analyzeAsset(name, type, size);
+
+        const asset = await assetModel.create({
+            user: user._id,
+            name,
+            type,
+            size,
+            url,
+            tags: analysis.tags || [],
+            summary: analysis.summary || "",
+            colors: analysis.colors || [],
+            resolution: analysis.resolution || "Unknown"
+        });
+
+        res.status(201).json({
+            message: "Asset uploaded and analyzed successfully",
+            asset
+        });
+    } catch (err) {
+        console.error("Upload Asset error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
 async function getAssets(req, res) {
     try {
         const user = req.user;
@@ -117,7 +125,6 @@ async function getAssets(req, res) {
             }
         }
 
-
         res.status(200).json({
             message: "Assets retrieved successfully",
             assets
@@ -156,10 +163,20 @@ async function deleteAsset(req, res) {
         const { id } = req.params;
         const user = req.user;
 
-        const asset = await assetModel.findOneAndDelete({ _id: id, user: user._id });
+        const asset = await assetModel.findOne({ _id: id, user: user._id });
         if (!asset) {
             return res.status(404).json({ message: "Asset not found" });
         }
+
+        // Delete from local disk if it's stored locally
+        if (asset.url.startsWith('/uploads/')) {
+            const filePath = path.join(__dirname, '../../public', asset.url);
+            fs.unlink(filePath, (err) => {
+                if (err) console.error("[Disk] Failed to delete file:", err.message);
+            });
+        }
+
+        await assetModel.deleteOne({ _id: id });
 
         res.status(200).json({
             message: "Asset deleted successfully",
@@ -167,6 +184,27 @@ async function deleteAsset(req, res) {
         });
     } catch (err) {
         console.error("Delete Asset error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
+async function getStorageSummary(req, res) {
+    try {
+        const user = req.user;
+
+        const result = await assetModel.aggregate([
+            { $match: { user: user._id } },
+            { $group: { _id: null, totalBytes: { $sum: "$size" } } }
+        ]);
+
+        const totalBytes = result.length > 0 ? result[0].totalBytes : 0;
+
+        res.status(200).json({
+            message: "Storage summary calculated successfully",
+            totalBytes
+        });
+    } catch (err) {
+        console.error("Storage summary error:", err);
         res.status(500).json({ message: "Internal server error" });
     }
 }
@@ -186,7 +224,6 @@ async function chatAsset(req, res) {
             return res.status(404).json({ message: "Asset not found" });
         }
 
-        // Generate response with asset context
         const contextMessages = [
             {
                 role: "user",
@@ -223,5 +260,6 @@ module.exports = {
     getAssets,
     toggleFavorite,
     deleteAsset,
+    getStorageSummary,
     chatAsset
 };

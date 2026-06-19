@@ -1,229 +1,129 @@
-const Groq = require("groq-sdk");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { HfInference } = require("@huggingface/inference");
 
-let TOOLS = [];
-let executeTool = null;
-
-try {
-    const toolsModule = require("./tools.service");
-    TOOLS = toolsModule.TOOLS || [];
-    executeTool = toolsModule.executeTool;
-} catch (error) {
-    console.warn("[AI] Tools module not available, proceeding without tools:", error.message);
+// Initialize Gemini
+let genAI = null;
+if (process.env.GEMINI_API_KEY) {
+    try {
+        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    } catch (err) {
+        console.error("[AI] Failed to initialize Gemini SDK:", err.message);
+    }
+} else {
+    console.warn("[AI] GEMINI_API_KEY is not defined in the environment.");
 }
 
-// ─── Clients ────────────────────────────────────────────────────────────────
-let groq;
-try {
-    groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-} catch (error) {
-    console.error("[AI] Groq client initialization failed:", error.message);
-}
-
+// Initialize Hugging Face for Embeddings (pinecone dependency)
 const hf = new HfInference(process.env.HF_API_KEY);
 
-// ─── System Prompt Template (without date) ───────────────────────────────────
-const SYSTEM_PROMPT_TEMPLATE = `
-<persona>
-  <name>Aurora</name>
-  <mission>Be a helpful, accurate AI assistant with a playful, upbeat vibe. Empower users to build, learn, and create fast.</mission>
-  <voice>Friendly, concise, Gen-Z energy without slang overload. Use plain language. Add light emojis sparingly when it fits (never more than one per short paragraph).</voice>
-  <values>Honesty, clarity, practicality, user-first. Admit limits. Prefer actionable steps over theory.</values>
-</persona>
-
-<behavior>
-  <tone>Playful but professional. Supportive, never condescending.</tone>
-  <formatting>Default to clear headings, short paragraphs, and minimal lists. Keep answers tight by default; expand only when asked.</formatting>
-  <interaction>If the request is ambiguous, briefly state assumptions and proceed. Offer a one-line clarifying question only when necessary. Never say you will work in the background or deliver later—complete what you can now.</interaction>
-  <safety>Do not provide disallowed, harmful, or private information. Refuse clearly and offer safer alternatives.</safety>
-  <truthfulness>If unsure, say so and provide best-effort guidance or vetted sources. Do not invent facts, code, APIs, or prices. Always use the current date/time provided below.</truthfulness>
-</behavior>
-
-<capabilities>
-  <reasoning>Think step-by-step internally; share only the useful outcome. Show calculations or assumptions when it helps the user.</reasoning>
-  <structure>Start with a quick answer or summary. Follow with steps, examples, or code. End with a brief "Next steps" when relevant.</structure>
-  <code>Provide runnable, minimal code. Include file names when relevant. Explain key decisions with one-line comments. Prefer modern best practices.</code>
-</capabilities>
-
-<constraints>
-  <privacy>Never request or store sensitive personal data beyond what is required. Avoid sharing credentials, tokens, or secrets.</privacy>
-  <claims>Do not guarantee outcomes or timelines. No "I'll keep working" statements.</claims>
-  <styleLimits>No purple prose. No excessive emojis. No walls of text unless explicitly requested.</styleLimits>
-  <time>ALWAYS use the current date and time provided below. DO NOT use outdated knowledge cutoff dates.</time>
-</constraints>
-
-<identity>You are "Aurora". Refer to yourself as Aurora when self-identifying.</identity>
-
-<current_context>
-  CURRENT_DATE: {CURRENT_DATE}
-  CURRENT_TIME: {CURRENT_TIME}
-  CURRENT_DATETIME: {CURRENT_DATETIME}
-  IMPORTANT: Use these current date/time values for ALL time-related questions and context.
-</current_context>
+// System Prompt for Sahil AI
+const SYSTEM_PROMPT = `
+You are "Sahil AI" (also referred to as Sahil GPT), an expert full-stack developer and AI-powered cloud storage assistant.
+Mission: Help users store, organize, analyze, and retrieve files within their digital vault on Sahil Drive.
+Voice & Tone: Playful, professional, highly capable, supportive.
+Current context: Use the current date and time for any queries about "recent visuals" or uploads.
+Always answer questions concisely and structure replies with clean markdown.
 `;
 
-// ─── Get dynamic system prompt with current date/time ─────────────────────────
-function getSystemPrompt() {
-    const now = new Date();
-    const currentDate = now.toISOString().split('T')[0];
-    const currentTime = now.toTimeString().split(' ')[0];
-    const currentDateTime = now.toLocaleString('en-US', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-
-    return SYSTEM_PROMPT_TEMPLATE
-        .replace('{CURRENT_DATE}', currentDate)
-        .replace('{CURRENT_TIME}', currentTime)
-        .replace('{CURRENT_DATETIME}', currentDateTime);
-}
-
-// ─── Helpers to convert message format ──────────────────────────────────────
-function toGroqMessages(contents) {
+// Helper to convert conversation history into Gemini SDK format
+function toGeminiHistory(contents) {
     if (!Array.isArray(contents)) return [];
-    
     return contents.map(item => {
-        if (!item) return { role: "user", content: "" };
-        if (item.toolCalls || item.tool_call_id) {
-            return item;
+        const role = item.role === "assistant" || item.role === "model" ? "model" : "user";
+        let text = "";
+        if (Array.isArray(item.parts)) {
+            text = item.parts.map(p => p.text).join("");
+        } else if (typeof item.content === "string") {
+            text = item.content;
         }
         return {
-            role: item.role === "model" ? "assistant" : item.role,
-            content: Array.isArray(item.parts)
-                ? item.parts.map(p => p.text).join("")
-                : (item.content || "")
+            role,
+            parts: [{ text }]
         };
     });
 }
 
-// ─── Ultimate fallback response (always works) ───────────────────────────────
-function getFallbackResponse(userMessage) {
-    const responses = [
-        "Hi there! I'm Aurora, your AI assistant. How can I help you today?",
-        "Hello! I'm here to help. What would you like to know?",
-        "Hey! I'm Aurora. Feel free to ask me anything!",
-        "Hi! I'd be happy to help you. What's on your mind?",
-        "Hello there! I'm Aurora, ready to assist you with whatever you need!"
-    ];
-    return responses[Math.floor(Math.random() * responses.length)];
-}
-
-// ─── Chat completion WITHOUT tools (simpler, more reliable) ─────────────────
-async function generateResponseWithoutTools(content) {
-    try {
-        if (!groq) {
-            console.warn("[AI] Groq client not available, using fallback");
-            return getFallbackResponse(content);
-        }
-
-        const messages = [
-            { role: "system", content: getSystemPrompt() },
-            ...toGroqMessages(content)
-        ];
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages,
-            temperature: 0.7,
-            max_tokens: 1024
-        });
-
-        const responseContent = completion.choices[0]?.message?.content;
-        if (!responseContent) {
-            throw new Error("No content in response");
-        }
-        return responseContent;
-    } catch (error) {
-        console.error("[AI] Error in generateResponseWithoutTools:", error.message);
-        return getFallbackResponse(content);
-    }
-}
-
-// ─── Chat completion WITH tools (try first, then fallback) ───────────────────
-async function generateResponseWithTools(content) {
-    try {
-        if (!groq || TOOLS.length === 0 || !executeTool) {
-            console.warn("[AI] Tools not available, using no-tools mode");
-            return await generateResponseWithoutTools(content);
-        }
-
-        let messages = [
-            { role: "system", content: getSystemPrompt() },
-            ...toGroqMessages(content)
-        ];
-
-        const maxIterations = 2;
-        let iteration = 0;
-
-        while (iteration < maxIterations) {
-            console.log("[AI] Tool calling iteration:", iteration + 1);
-            
-            const completion = await groq.chat.completions.create({
-                model: "llama-3.3-70b-versatile",
-                messages,
-                tools: TOOLS,
-                temperature: 0.7,
-                max_tokens: 1024
-            });
-
-            const responseMessage = completion.choices[0].message;
-
-            if (!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) {
-                return responseMessage.content;
-            }
-
-            messages.push(responseMessage);
-
-            for (const toolCall of responseMessage.tool_calls) {
-                const functionName = toolCall.function.name;
-                console.log("[AI] Executing tool:", functionName);
-                
-                try {
-                    const functionArgs = JSON.parse(toolCall.function.arguments);
-                    const toolResult = await executeTool(functionName, functionArgs);
-                    
-                    messages.push({
-                        tool_call_id: toolCall.id,
-                        role: "tool",
-                        name: functionName,
-                        content: JSON.stringify(toolResult)
-                    });
-                } catch (toolError) {
-                    console.error("[AI] Tool execution error:", toolError.message);
-                    messages.push({
-                        tool_call_id: toolCall.id,
-                        role: "tool",
-                        name: functionName,
-                        content: JSON.stringify({ error: toolError.message })
-                    });
-                }
-            }
-
-            iteration++;
-        }
-
-        return await generateResponseWithoutTools(content);
-    } catch (error) {
-        console.error("[AI] Error in generateResponseWithTools:", error.message);
-        return await generateResponseWithoutTools(content);
-    }
-}
-
-// ─── MAIN generateResponse with MULTIPLE FALLBACKS ───────────────────────────
+// Generate Chat Response using Gemini
 async function generateResponse(content) {
     try {
-        return await generateResponseWithTools(content);
+        if (!genAI) {
+            throw new Error("Gemini API key is not configured.");
+        }
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash",
+            systemInstruction: SYSTEM_PROMPT
+        });
+
+        const chatMessages = toGeminiHistory(content);
+        
+        // Split history from the latest message
+        if (chatMessages.length === 0) {
+            return "Hello! I am Sahil AI. How can I assist you with your files today?";
+        }
+        
+        const latestMessage = chatMessages.pop();
+        const chat = model.startChat({
+            history: chatMessages
+        });
+
+        const result = await chat.sendMessage(latestMessage.parts[0].text);
+        return result.response.text();
     } catch (error) {
-        console.warn("[AI] All methods failed, using ultimate fallback:", error.message);
-        return getFallbackResponse(content);
+        console.error("[Gemini] generateResponse error:", error.message);
+        return "Sorry, I encountered an issue generating a response. Please verify that your GEMINI_API_KEY is configured correctly.";
     }
 }
 
-// ─── Embeddings (with fallback) ──────────────────────────────────────────────
+// Analyze File Details (generate tags, summaries, colors, and resolutions)
+async function analyzeAsset(fileName, fileType, fileSize) {
+    try {
+        if (!genAI) {
+            throw new Error("Gemini API key is not configured.");
+        }
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        const prompt = `Analyze this file metadata for a cloud storage platform (Sahil Drive).
+File Name: ${fileName}
+File Type: ${fileType}
+File Size: ${(fileSize / (1024 * 1024)).toFixed(2)} MB
+
+Provide a JSON response containing:
+1. "tags": An array of 4 to 6 relevant tags (like "#Sunset", "#Beach", "#Ocean", "#Nature").
+2. "summary": A 2-3 sentence smart summary of what the file likely represents, written in a high-end SaaS tone. Use the name "Sahil AI" to describe yourself when referring to the analysis, e.g. "Sahil AI detects...".
+3. "colors": An array of 2 primary hex colors matching the theme of the file.
+4. "resolution": A typical high-quality resolution (like "4096 x 2304" for 4K image, or a suitable resolution for the file type, e.g., "1920 x 1080 (1080p)" for video).
+
+Respond ONLY with the JSON object. Do not include markdown formatting or wrappers.`;
+
+        const result = await model.generateContent(prompt);
+        let text = result.response.text().trim();
+
+        // Strip markdown code block markers if present
+        if (text.startsWith("```json")) {
+            text = text.substring(7);
+        }
+        if (text.startsWith("```")) {
+            text = text.substring(3);
+        }
+        if (text.endsWith("```")) {
+            text = text.substring(0, text.length - 3);
+        }
+        text = text.trim();
+
+        return JSON.parse(text);
+    } catch (error) {
+        console.error("[Gemini] analyzeAsset error:", error.message);
+        const isVideo = fileType.startsWith("video/");
+        return {
+            tags: isVideo ? ["#Demo", "#Clip", "#Video"] : ["#Image", "#Visual", "#Asset"],
+            summary: `This is an uploaded file named ${fileName}. Sahil AI detects standard parameters.`,
+            colors: ["#06B6D4", "#7C3AED"],
+            resolution: isVideo ? "1920 x 1080 (1080p)" : "3840 x 2160 (4K)"
+        };
+    }
+}
+
+// Embeddings Generation for Pinecone Long-Term Memory
 async function generateVector(content) {
     try {
         const text = typeof content === "string"
@@ -245,48 +145,8 @@ async function generateVector(content) {
     }
 }
 
-async function analyzeAsset(fileName, fileType, fileSize) {
-    try {
-        if (!groq) {
-            throw new Error("Groq client not available");
-        }
-        
-        const systemPrompt = `You are Sahil Drive's AI File Analyzer. Analyze the file name, type, and size.
-Provide a JSON response containing:
-1. "tags": An array of 4 to 6 relevant tags (like "#Sunset", "#Beach", "#Ocean", "#Nature").
-2. "summary": A 2-3 sentence smart summary of what the file likely represents, written in a high-end SaaS tone. Use the name "Sahil AI" to describe yourself when referring to the analysis, e.g. "Sahil AI detects...".
-3. "colors": An array of 2 primary hex colors matching the theme of the file.
-4. "resolution": A typical high-quality resolution (like "4096 x 2304" for 4K image, or a suitable resolution for the file type, e.g., "1920 x 1080 (1080p)" for video).
-
-Ensure the output is STRICTLY valid JSON and nothing else. No markdown wrappers.`;
-
-        const userPrompt = `File Name: ${fileName}
-File Type: ${fileType}
-File Size: ${(fileSize / (1024 * 1024)).toFixed(2)} MB`;
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt }
-            ],
-            temperature: 0.5,
-            response_format: { type: "json_object" }
-        });
-
-        const resultText = completion.choices[0]?.message?.content;
-        return JSON.parse(resultText);
-    } catch (error) {
-        console.error("[AI] analyzeAsset error:", error.message);
-        const isVideo = fileType.startsWith("video/");
-        return {
-            tags: isVideo ? ["#Demo", "#Clip", "#Video"] : ["#Image", "#Visual", "#Asset"],
-            summary: `This is a uploaded ${fileType.split("/")[1] || "file"} named ${fileName}. Sahil AI is processing its content and tags.`,
-            colors: ["#3B82F6", "#10B981"],
-            resolution: isVideo ? "1920 x 1080 (HD)" : "3840 x 2160 (4K)"
-        };
-    }
-}
-
-module.exports = { generateResponse, generateVector, analyzeAsset };
-
+module.exports = {
+    generateResponse,
+    generateVector,
+    analyzeAsset
+};

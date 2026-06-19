@@ -49,6 +49,7 @@ const Home = () => {
   const [isAiOpen, setIsAiOpen] = useState(true);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [socket, setSocket] = useState(null);
+  const [storageBytes, setStorageBytes] = useState(0);
 
   // General Chat Messages
   const [generalMessages, setGeneralMessages] = useState([]);
@@ -75,6 +76,15 @@ const Home = () => {
     }
   };
 
+  const fetchStorageSummary = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/api/assets/storage-summary`, { withCredentials: true });
+      setStorageBytes(res.data.totalBytes);
+    } catch (err) {
+      console.error("Error fetching storage summary:", err);
+    }
+  };
+
   const fetchAssets = async (tab = 'all', search = '') => {
     try {
       let url = `${API_URL}/api/assets`;
@@ -90,6 +100,8 @@ const Home = () => {
 
       const res = await axios.get(url, { withCredentials: true });
       dispatch(setFiles(res.data.assets));
+      // Refresh storage calculation
+      fetchStorageSummary();
     } catch (err) {
       console.error("Error fetching assets:", err);
     }
@@ -118,6 +130,7 @@ const Home = () => {
   // Load User, Chats & Sockets on Mount
   useEffect(() => {
     fetchUser();
+    fetchStorageSummary();
 
     axios.get(`${API_URL}/api/chat`, { withCredentials: true })
       .then(response => {
@@ -180,14 +193,13 @@ const Home = () => {
     if (activeAsset) {
       const initialChecked = {};
       activeAsset.tags.forEach((tag, idx) => {
-        // Mocking: select first two tags as checked initially
         initialChecked[tag] = idx < 2;
       });
       setCheckedTags(initialChecked);
     }
   }, [activeAsset]);
 
-  // ─── File Upload Logic ─────────────────────────────────────────────────────
+  // ─── File Upload Logic (Multer Binary FormData) ───────────────────────────
   const triggerFileUpload = () => {
     fileInputRef.current?.click();
   };
@@ -200,47 +212,44 @@ const Home = () => {
     dispatch(setAnalysisProgress(0));
     dispatch(setAnalysisStatus('analyzing'));
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const base64Data = event.target.result;
+    const formData = new FormData();
+    formData.append('file', file);
 
-      try {
-        const response = await axios.post(`${API_URL}/api/assets/upload`, {
-          name: file.name,
-          type: file.type,
-          size: file.size,
-          url: base64Data
-        }, { withCredentials: true });
+    try {
+      const response = await axios.post(`${API_URL}/api/assets/upload`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        },
+        withCredentials: true
+      });
 
-        const newAsset = response.data.asset;
-        dispatch(addFile(newAsset));
-        dispatch(setActiveAssetContext(newAsset));
+      const newAsset = response.data.asset;
+      dispatch(addFile(newAsset));
+      dispatch(setActiveAssetContext(newAsset));
 
-        // Start progressive analysis loading overlay
-        let progress = 0;
-        const interval = setInterval(() => {
-          progress += 4;
-          if (progress >= 100) {
-            progress = 100;
-            clearInterval(interval);
-            dispatch(setAnalysisProgress(100));
-            dispatch(setAnalysisStatus('completed'));
-            setIsAiOpen(true);
-          } else {
-            dispatch(setAnalysisProgress(progress));
-          }
-        }, 120);
+      // Start progressive analysis loading overlay
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 5;
+        if (progress >= 100) {
+          progress = 100;
+          clearInterval(interval);
+          dispatch(setAnalysisProgress(100));
+          dispatch(setAnalysisStatus('completed'));
+          setIsAiOpen(true);
+          fetchStorageSummary(); // Refresh total storage size
+        } else {
+          dispatch(setAnalysisProgress(progress));
+        }
+      }, 100);
 
-      } catch (err) {
-        console.error("Upload failed:", err);
-        dispatch(setAnalysisStatus('failed'));
-      } finally {
-        dispatch(setUploading(false));
-        if (fileInputRef.current) fileInputRef.current.value = "";
-      }
-    };
-
-    reader.readAsDataURL(file);
+    } catch (err) {
+      console.error("Upload failed:", err);
+      dispatch(setAnalysisStatus('failed'));
+    } finally {
+      dispatch(setUploading(false));
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   // ─── General Chat Send ─────────────────────────────────────────────────────
@@ -263,7 +272,6 @@ const Home = () => {
     const trimmed = fileChatInput.trim();
     if (!trimmed || !activeAsset) return;
 
-    // Append user message immediately
     const userMsg = { type: 'user', content: trimmed };
     const assetId = activeAsset._id;
     
@@ -298,7 +306,6 @@ const Home = () => {
   const triggerContextualAction = async (actionName, promptText) => {
     if (!activeAsset) return;
 
-    // Simulate clicking action by appending custom user message and fetching response
     const userMsg = { type: 'user', content: promptText };
     const assetId = activeAsset._id;
 
@@ -338,6 +345,7 @@ const Home = () => {
     try {
       await axios.delete(`${API_URL}/api/assets/${id}`, { withCredentials: true });
       dispatch(removeFile(id));
+      fetchStorageSummary(); // Refresh total storage size
     } catch (err) {
       console.error("Error deleting asset:", err);
     }
@@ -353,6 +361,14 @@ const Home = () => {
     }
   };
 
+  // ─── Dynamic URL Parser ────────────────────────────────────────────────────
+  const getFileUrl = (url) => {
+    if (url && url.startsWith('/uploads/')) {
+      return `${API_URL}${url}`;
+    }
+    return url;
+  };
+
   // ─── Helpers ───────────────────────────────────────────────────────────────
   const formatBytes = (bytes, decimals = 1) => {
     if (!bytes) return '0 Bytes';
@@ -364,10 +380,12 @@ const Home = () => {
   };
 
   const getStorageGBUsed = () => {
-    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-    const addedGB = totalBytes / (1024 * 1024 * 1024);
-    // Base 12.5 GB usage just to feel like the mockup
-    return (12.5 + addedGB).toFixed(1);
+    const gb = storageBytes / (1024 * 1024 * 1024);
+    if (gb < 0.1) {
+      const mb = storageBytes / (1024 * 1024);
+      return `${mb.toFixed(1)} MB`;
+    }
+    return `${gb.toFixed(2)} GB`;
   };
 
   const activeFileConversation = fileChats[activeAsset?._id] || [];
@@ -451,12 +469,12 @@ const Home = () => {
           <div className="storage-section">
             <div className="storage-header">
               <span>Storage Usage</span>
-              <span>{getStorageGBUsed()}GB / 25GB</span>
+              <span>{getStorageGBUsed()} / 25 GB</span>
             </div>
             <div className="storage-bar-bg">
               <div
                 className="storage-bar-fill"
-                style={{ width: `${(parseFloat(getStorageGBUsed()) / 25) * 100}%` }}
+                style={{ width: `${Math.min(100, (storageBytes / (25 * 1024 * 1024 * 1024)) * 100)}%` }}
               ></div>
             </div>
           </div>
@@ -585,13 +603,13 @@ const Home = () => {
                 {/* Main Media Preview Render */}
                 {activeAsset.type.startsWith('video/') ? (
                   <video
-                    src={activeAsset.url}
+                    src={getFileUrl(activeAsset.url)}
                     controls
                     className="detail-video-player"
                     poster="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=800"
                   />
                 ) : (
-                  <img src={activeAsset.url} alt={activeAsset.name} className="detail-media" />
+                  <img src={getFileUrl(activeAsset.url)} alt={activeAsset.name} className="detail-media" />
                 )}
               </div>
 
@@ -678,7 +696,7 @@ const Home = () => {
                             <span className="video-duration">02:14</span>
                           </>
                         ) : (
-                          <img src={file.url} alt={file.name} className="file-thumbnail" />
+                          <img src={getFileUrl(file.url)} alt={file.name} className="file-thumbnail" />
                         )}
 
                         {/* Hover Actions Menu overlay */}
@@ -697,7 +715,7 @@ const Home = () => {
                             Analyze with AI
                           </button>
                           <a
-                            href={file.url}
+                            href={getFileUrl(file.url)}
                             download={file.name}
                             target="_blank"
                             rel="noopener noreferrer"
@@ -828,7 +846,7 @@ const Home = () => {
                 <div className="actions-list">
                   <button
                     className="action-card-btn"
-                    onClick={() => triggerContextualAction("enhance", "Enhance Quality: Upscale this asset to 8K resolution and describe adjustments")}
+                    onClick={() => triggerContextualAction("enhance", `Analyze and enhance ${activeAsset.name} to 8K resolution. Provide hex details and processing parameters.`)}
                   >
                     <span className="action-icon-wrapper">
                       <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -843,7 +861,7 @@ const Home = () => {
 
                   <button
                     className="action-card-btn"
-                    onClick={() => triggerContextualAction("fill", "Generative Fill: Extend borders beyond the frame and describe filled spaces")}
+                    onClick={() => triggerContextualAction("fill", `Perform Generative Fill beyond the borders of ${activeAsset.name}. Describe the aesthetic expansions.`)}
                   >
                     <span className="action-icon-wrapper">
                       <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -858,7 +876,7 @@ const Home = () => {
 
                   <button
                     className="action-card-btn"
-                    onClick={() => triggerContextualAction("colors", "Color Palette: Extract dominant hex color codes and explain design choices")}
+                    onClick={() => triggerContextualAction("colors", `Extract the hex codes and detailed color palette of ${activeAsset.name} for design implementation.`)}
                   >
                     <span className="action-icon-wrapper">
                       <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -939,19 +957,19 @@ const Home = () => {
             <div className="quick-chips-wrapper">
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Describe my latest image file.")); }}
+                onClick={() => { dispatch(setInput("Analyze my uploaded sunset beach image file details.")); }}
               >
                 Describe this image
               </button>
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Transcribe video file details and summarize actions.")); }}
+                onClick={() => { dispatch(setInput("Transcribe product_demo.mp4 file details and summarize actions.")); }}
               >
                 Transcribe video
               </button>
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Find similar files in my cloud storage.")); }}
+                onClick={() => { dispatch(setInput("Find similar urban cityscape files in my cloud storage index.")); }}
               >
                 Find similar files
               </button>

@@ -31,8 +31,8 @@ Your Render web service needs the new Groq and Hugging Face credentials, as well
 
 | Action | Key | Value | Purpose |
 | :--- | :--- | :--- | :--- |
-| **❌ DELETE** | `GEMINI_API_KEY` | *(Remove this key entirely)* | No longer used. Switched to Groq. |
-| **➕ ADD** | `GROQ_API_KEY` | `<your_groq_api_key>` | Groq Llama Chat Completion Key. |
+| **➕ ADD** | `GEMINI_API_KEY` | `<your_gemini_api_key>` | Google Gemini API Key for Sahil AI and Tagging. |
+| **❌ DELETE** | `GROQ_API_KEY` | *(Remove this key entirely)* | No longer used. Switched to Gemini. |
 | **➕ ADD** | `HF_API_KEY` | `<your_huggingface_api_key>` | Hugging Face Serverless Inference Key. |
 | **✏️ UPDATE** | `MONGO_URI` | `mongodb+srv://nickleister402:<your_password>@cluster0.fimf5jp.mongodb.net/?appName=Cluster0` | Correct, fully qualified MongoDB connection string. |
 | **✏️ UPDATE** | `PINECONE_API_KEY` | `<your_pinecone_api_key>` | Your Pinecone API Key (corrected from screenshot). |
@@ -41,6 +41,7 @@ Your Render web service needs the new Groq and Hugging Face credentials, as well
 > [!NOTE]
 > We implemented **fail-safe error handlers** in both `vector.service.js` and `socket.server.js`.
 > Even if your Pinecone API Key or index is deactivated, expired, or rate-limited, the application will **automatically fallback gracefully** and continue functioning perfectly instead of hanging or throwing errors.
+
 
 6. Scroll down and click **Save Changes**.
 
