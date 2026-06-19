@@ -5,6 +5,7 @@ const userModel = require("../models/user.model");
 const aiService = require("../services/ai.service")
 const messageModel = require("../models/message.model");
 const { createMemory, queryMemory } = require("../services/vector.service")
+const assetModel = require("../models/asset.model");
 
 
 function initSocketServer(httpServer) {
@@ -52,12 +53,86 @@ function initSocketServer(httpServer) {
     io.on("connection", (socket) => {
 
         socket.on("ai-message", async (messagePayload) => {
-            /* messagePayload = { chat: chatId, content: message text } */
+            /* messagePayload = { chat: chatId, content: message text, folderId: parentFolderId } */
 
             try {
                 const userId   = socket.user._id.toString();
                 const chatId   = messagePayload.chat.toString();
                 const userText = messagePayload.content;
+
+                // A. Check if the message is a slash command: /summarize <filename>
+                const summarizeMatch = userText.trim().match(/^\/summarize\s+(.+)$/i);
+                if (summarizeMatch) {
+                    const fileName = summarizeMatch[1].trim();
+                    const asset = await assetModel.findOne({
+                        user: userId,
+                        name: { $regex: new RegExp('^' + fileName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '$', 'i') }
+                    });
+
+                    let response = "";
+                    if (!asset) {
+                        response = `Could not find file named "${fileName}" in your drive. Please make sure the filename matches exactly.`;
+                    } else {
+                        const summarizePrompt = `Please summarize the following file in detail:\n` +
+                            `Name: ${asset.name}\n` +
+                            `Type: ${asset.type}\n` +
+                            `Size: ${(asset.size / (1024 * 1024)).toFixed(2)} MB\n` +
+                            `Resolution: ${asset.resolution}\n` +
+                            `Tags: ${asset.tags.join(', ')}\n` +
+                            `Original Summary: ${asset.summary}\n\n` +
+                            `Format your output as a professional summary, highlighting the key aspects, themes, and potential uses of this file.`;
+
+                        response = await aiService.generateResponse([
+                            {
+                                role: "user",
+                                parts: [{ text: summarizePrompt }]
+                            }
+                        ]);
+                    }
+
+                    // Save both user command and AI response to the DB
+                    const [userMsg, responseMsg] = await Promise.all([
+                        messageModel.create({
+                            chat: chatId,
+                            user: userId,
+                            content: userText,
+                            role: "user"
+                        }),
+                        messageModel.create({
+                            chat: chatId,
+                            user: userId,
+                            content: response,
+                            role: "model"
+                        })
+                    ]);
+
+                    // Generate vectors for both in parallel (non-blocking Pinecone update)
+                    Promise.all([
+                        aiService.generateVector(userText).then(v => {
+                            if (v) createMemory({ vectors: v, messageId: userMsg._id, metadata: { chat: chatId, user: userId, text: userText, role: "user" } });
+                        }),
+                        aiService.generateVector(response).then(v => {
+                            if (v) createMemory({ vectors: v, messageId: responseMsg._id, metadata: { chat: chatId, user: userId, text: response, role: "model" } });
+                        })
+                    ]).catch(err => console.error("Error creating vector memory for /summarize:", err.message));
+
+                    // Send response to frontend
+                    socket.emit("ai-response", {
+                        content: response,
+                        chat: chatId
+                    });
+                    return;
+                }
+
+                // B. Fetch Folder Context String
+                let folderContextString = "";
+                if (messagePayload.folderId) {
+                    const parentFolderId = (messagePayload.folderId === 'root' || messagePayload.folderId === 'null') ? null : messagePayload.folderId;
+                    const folderAssets = await assetModel.find({ user: userId, parentFolderId }).lean();
+                    if (folderAssets && folderAssets.length > 0) {
+                        folderContextString = folderAssets.map(asset => `• ${asset.isFolder ? '[Folder]' : '[File]'} Name: ${asset.name}, Type: ${asset.type}, Size: ${(asset.size / (1024 * 1024)).toFixed(2)} MB, Tags: ${asset.tags.join(', ')}, Summary: ${asset.summary}`).join("\n");
+                    }
+                }
 
                 // 1️⃣ Save user message to DB + generate embedding (parallel with safe catch)
                 const [ message, vectors ] = await Promise.all([
@@ -122,8 +197,8 @@ function initSocketServer(httpServer) {
                     }]
                     : []   // skip if no memory yet
 
-                // 6️⃣ Generate AI response
-                const response = await aiService.generateResponse([ ...ltm, ...stm ])
+                // 6️⃣ Generate AI response (passing folderContextString as parameter)
+                const response = await aiService.generateResponse([ ...ltm, ...stm ], folderContextString)
 
                 // 7️⃣ Send response to frontend immediately
                 socket.emit("ai-response", {

@@ -16,11 +16,11 @@ const assetSchema = new mongoose.Schema({
     },
     size: {
         type: Number,
-        required: true
+        default: 0
     },
     url: {
         type: String,
-        required: true
+        default: ""
     },
     tags: {
         type: [String],
@@ -41,7 +41,43 @@ const assetSchema = new mongoose.Schema({
     isFavorite: {
         type: Boolean,
         default: false
-    }
+    },
+    // Google Drive structures
+    isFolder: {
+        type: Boolean,
+        default: false
+    },
+    parentFolderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'asset',
+        default: null
+    },
+    mimeType: {
+        type: String,
+        default: ""
+    },
+    // Access permission mappings
+    publicLinkAccess: {
+        type: String,
+        enum: ['restricted', 'view', 'comment', 'edit'],
+        default: 'restricted'
+    },
+    sharedUsers: [
+        {
+            userId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'user'
+            },
+            email: {
+                type: String
+            },
+            role: {
+                type: String,
+                enum: ['viewer', 'commenter', 'editor'],
+                default: 'viewer'
+            }
+        }
+    ]
 }, {
     timestamps: true
 });

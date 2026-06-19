@@ -8,6 +8,9 @@ const router = express.Router();
 /* POST /api/assets/upload */
 router.post('/upload', authMiddleware.authUser, uploadMiddleware.single('file'), assetController.uploadAsset);
 
+/* POST /api/assets/folder */
+router.post('/folder', authMiddleware.authUser, assetController.createFolder);
+
 /* GET /api/assets/ */
 router.get('/', authMiddleware.authUser, assetController.getAssets);
 

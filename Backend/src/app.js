@@ -18,6 +18,10 @@ const chatRoutes = require("./routes/chat.routes");
 
 const assetRoutes = require("./routes/asset.routes");
 
+const uploadRoutes = require("./routes/upload.routes");
+
+const shareRoutes = require("./routes/share.routes");
+
 
 
 
@@ -68,6 +72,10 @@ app.use('/api/auth', authRoutes);
 app.use('/api/chat', chatRoutes);
 
 app.use('/api/assets', assetRoutes);
+
+app.use('/api/upload', uploadRoutes);
+
+app.use('/api/shares', shareRoutes);
 
 
 

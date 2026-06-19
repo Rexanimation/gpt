@@ -44,14 +44,20 @@ function toGeminiHistory(contents) {
 }
 
 // Generate Chat Response using Gemini
-async function generateResponse(content) {
+async function generateResponse(content, folderContextString = "") {
     try {
         if (!genAI) {
             throw new Error("Gemini API key is not configured.");
         }
+
+        let systemInstruction = SYSTEM_PROMPT;
+        if (folderContextString) {
+            systemInstruction += `\n\n[Active Directory Context]\nThe user is currently browsing a folder containing these files:\n${folderContextString}`;
+        }
+
         const model = genAI.getGenerativeModel({
             model: "gemini-2.5-flash",
-            systemInstruction: SYSTEM_PROMPT
+            systemInstruction
         });
 
         const chatMessages = toGeminiHistory(content);

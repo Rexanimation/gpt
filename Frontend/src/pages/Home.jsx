@@ -44,7 +44,7 @@ const Home = () => {
 
   // Local state
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('all'); // 'all', 'image', 'video', 'favorites'
+  const [activeTab, setActiveTab] = useState('all'); // 'all', 'image', 'video', 'favorites', 'shared'
   const [searchQuery, setSearchQuery] = useState('');
   const [isAiOpen, setIsAiOpen] = useState(true);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
@@ -66,6 +66,25 @@ const Home = () => {
   const messagesEndRef = useRef(null);
   const fileMessagesEndRef = useRef(null);
 
+  // Nested directory states
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' | 'list'
+  const [currentFolderId, setCurrentFolderId] = useState(null);
+  const [folderPath, setFolderPath] = useState([]);
+  
+  // Folder Creation Modal
+  const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
+  const [folderNameInput, setFolderNameInput] = useState('');
+
+  // Share Settings Modal
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [shareAsset, setShareAsset] = useState(null);
+  const [shareEmail, setShareEmail] = useState('');
+  const [shareRole, setShareRole] = useState('viewer');
+  const [publicAccess, setPublicAccess] = useState('restricted');
+
+  // Floating Upload Progress Monitor Queue
+  const [activeUploads, setActiveUploads] = useState([]);
+
   // ─── Fetch User & Assets ───────────────────────────────────────────────────
   const fetchUser = async () => {
     try {
@@ -85,16 +104,27 @@ const Home = () => {
     }
   };
 
-  const fetchAssets = async (tab = 'all', search = '') => {
+  const fetchAssets = async (tab = 'all', search = '', folderId = null) => {
     try {
-      let url = `${API_URL}/api/assets`;
+      let url;
+      if (tab === 'shared') {
+        url = `${API_URL}/api/shares/shared-with-me`;
+      } else {
+        url = `${API_URL}/api/assets`;
+      }
+      
       const params = [];
       if (tab === 'image') params.push('type=image');
       if (tab === 'video') params.push('type=video');
       if (tab === 'favorites') params.push('favorite=true');
       if (search) params.push(`search=${encodeURIComponent(search)}`);
       
-      if (params.length > 0) {
+      // Filter by folder level if browsing files normally and not searching
+      if (tab === 'all' && !search) {
+        params.push(`parentFolderId=${folderId || 'null'}`);
+      }
+
+      if (params.length > 0 && tab !== 'shared') {
         url += `?${params.join('&')}`;
       }
 
@@ -120,12 +150,12 @@ const Home = () => {
     }
   };
 
-  // ─── Sync search and tab changes ───────────────────────────────────────────
+  // ─── Sync search, folder, and tab changes ───────────────────────────────────
   useEffect(() => {
     if (user) {
-      fetchAssets(activeTab, searchQuery);
+      fetchAssets(activeTab, searchQuery, currentFolderId);
     }
-  }, [activeTab, searchQuery, user]);
+  }, [activeTab, searchQuery, currentFolderId, user]);
 
   // Load User, Chats & Sockets on Mount
   useEffect(() => {
@@ -192,14 +222,53 @@ const Home = () => {
   useEffect(() => {
     if (activeAsset) {
       const initialChecked = {};
-      activeAsset.tags.forEach((tag, idx) => {
-        initialChecked[tag] = idx < 2;
-      });
+      if (activeAsset.tags) {
+        activeAsset.tags.forEach((tag, idx) => {
+          initialChecked[tag] = idx < 2;
+        });
+      }
       setCheckedTags(initialChecked);
     }
   }, [activeAsset]);
 
-  // ─── File Upload Logic (Multer Binary FormData) ───────────────────────────
+  // ─── Folder Navigation Breadcrumbs Logic ──────────────────────────────────
+  const navigateToFolder = (folderId, folderName) => {
+    if (folderId === null || folderId === 'root') {
+      setCurrentFolderId(null);
+      setFolderPath([]);
+    } else {
+      setCurrentFolderId(folderId);
+      const idx = folderPath.findIndex(p => p._id === folderId);
+      if (idx !== -1) {
+        setFolderPath(folderPath.slice(0, idx + 1));
+      } else {
+        setFolderPath([...folderPath, { _id: folderId, name: folderName }]);
+      }
+    }
+    dispatch(setActiveAssetContext(null));
+  };
+
+  // ─── Create New Folder ─────────────────────────────────────────────────────
+  const handleCreateFolder = async (e) => {
+    e.preventDefault();
+    if (!folderNameInput.trim()) return;
+
+    try {
+      const res = await axios.post(`${API_URL}/api/assets/folder`, {
+        name: folderNameInput.trim(),
+        parentFolderId: currentFolderId
+      }, { withCredentials: true });
+
+      dispatch(addFile(res.data.folder));
+      setFolderNameInput('');
+      setIsCreateFolderOpen(false);
+    } catch (err) {
+      console.error("Folder creation failed:", err);
+      alert(err.response?.data?.message || "Failed to create folder");
+    }
+  };
+
+  // ─── File Upload Logic (Multer Standard / Chunked Pipeline) ───────────────
   const triggerFileUpload = () => {
     fileInputRef.current?.click();
   };
@@ -208,46 +277,145 @@ const Home = () => {
     const file = e.target.files[0];
     if (!file) return;
 
-    dispatch(setUploading(true));
-    dispatch(setAnalysisProgress(0));
-    dispatch(setAnalysisStatus('analyzing'));
+    const trackingId = Math.random().toString(36).substring(7);
+    const newUpload = {
+      id: trackingId,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      status: 'uploading',
+      chunksUploaded: 0,
+      totalChunks: 1
+    };
 
-    const formData = new FormData();
-    formData.append('file', file);
+    setActiveUploads(prev => [...prev, newUpload]);
+
+    // Check if large file needing chunk ingestion (> 10MB)
+    const isChunked = file.size > 10 * 1024 * 1024;
 
     try {
-      const response = await axios.post(`${API_URL}/api/assets/upload`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        },
-        withCredentials: true
-      });
-
-      const newAsset = response.data.asset;
-      dispatch(addFile(newAsset));
-      dispatch(setActiveAssetContext(newAsset));
-
-      // Start progressive analysis loading overlay
-      let progress = 0;
-      const interval = setInterval(() => {
-        progress += 5;
-        if (progress >= 100) {
-          progress = 100;
-          clearInterval(interval);
-          dispatch(setAnalysisProgress(100));
-          dispatch(setAnalysisStatus('completed'));
-          setIsAiOpen(true);
-          fetchStorageSummary(); // Refresh total storage size
-        } else {
-          dispatch(setAnalysisProgress(progress));
+      if (!isChunked) {
+        // Standard Single File Upload Pipeline
+        const formData = new FormData();
+        formData.append('file', file);
+        if (currentFolderId) {
+          formData.append('parentFolderId', currentFolderId);
         }
-      }, 100);
 
+        const response = await axios.post(`${API_URL}/api/assets/upload`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          },
+          withCredentials: true,
+          onUploadProgress: (progressEvent) => {
+            const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            setActiveUploads(prev => prev.map(up => up.id === trackingId ? { ...up, progress } : up));
+          }
+        });
+
+        const newAsset = response.data.asset;
+        dispatch(addFile(newAsset));
+        
+        // Remove from upload queue
+        setActiveUploads(prev => prev.filter(up => up.id !== trackingId));
+
+        // Start progressive AI analysis overlay simulation
+        dispatch(setActiveAssetContext(newAsset));
+        dispatch(setAnalysisProgress(0));
+        dispatch(setAnalysisStatus('analyzing'));
+        
+        let progress = 0;
+        const interval = setInterval(() => {
+          progress += 5;
+          if (progress >= 100) {
+            clearInterval(interval);
+            dispatch(setAnalysisProgress(100));
+            dispatch(setAnalysisStatus('completed'));
+            setIsAiOpen(true);
+            fetchStorageSummary();
+          } else {
+            dispatch(setAnalysisProgress(progress));
+          }
+        }, 100);
+
+      } else {
+        // Chunk Ingestion Pipeline (5MB chunks)
+        const CHUNK_SIZE = 5 * 1024 * 1024;
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+        setActiveUploads(prev => prev.map(up => up.id === trackingId ? { ...up, totalChunks } : up));
+
+        // 1. Initiate upload
+        const initRes = await axios.post(`${API_URL}/api/upload/initiate`, {
+          name: file.name,
+          size: file.size,
+          type: file.type
+        }, { withCredentials: true });
+
+        const { uploadId } = initRes.data;
+
+        // 2. Upload chunk parts sequentially
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunkBlob = file.slice(start, end);
+
+          const formData = new FormData();
+          formData.append('uploadId', uploadId);
+          formData.append('chunkIndex', i);
+          formData.append('chunk', chunkBlob, file.name);
+
+          await axios.post(`${API_URL}/api/upload/chunk`, formData, {
+            headers: {
+              'Content-Type': 'multipart/form-data'
+            },
+            withCredentials: true
+          });
+
+          const progress = Math.round(((i + 1) / totalChunks) * 100);
+          setActiveUploads(prev => prev.map(up => up.id === trackingId ? { ...up, progress, chunksUploaded: i + 1 } : up));
+        }
+
+        // 3. Finalize upload
+        const finalizeRes = await axios.post(`${API_URL}/api/upload/finalize`, {
+          uploadId,
+          totalChunks,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          parentFolderId: currentFolderId
+        }, { withCredentials: true });
+
+        const newAsset = finalizeRes.data.asset;
+        dispatch(addFile(newAsset));
+
+        // Remove from upload queue
+        setActiveUploads(prev => prev.filter(up => up.id !== trackingId));
+
+        // Start progressive AI analysis overlay simulation
+        dispatch(setActiveAssetContext(newAsset));
+        dispatch(setAnalysisProgress(0));
+        dispatch(setAnalysisStatus('analyzing'));
+
+        let progress = 0;
+        const interval = setInterval(() => {
+          progress += 5;
+          if (progress >= 100) {
+            clearInterval(interval);
+            dispatch(setAnalysisProgress(100));
+            dispatch(setAnalysisStatus('completed'));
+            setIsAiOpen(true);
+            fetchStorageSummary();
+          } else {
+            dispatch(setAnalysisProgress(progress));
+          }
+        }, 100);
+      }
     } catch (err) {
-      console.error("Upload failed:", err);
-      dispatch(setAnalysisStatus('failed'));
+      console.error("Upload process failed:", err);
+      setActiveUploads(prev => prev.map(up => up.id === trackingId ? { ...up, status: 'failed' } : up));
+      alert(`Upload failed for ${file.name}`);
     } finally {
-      dispatch(setUploading(false));
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
@@ -263,7 +431,8 @@ const Home = () => {
 
     socket.emit("ai-message", {
       chat: activeChatId,
-      content: trimmed
+      content: trimmed,
+      folderId: currentFolderId || 'root'
     });
   };
 
@@ -341,13 +510,51 @@ const Home = () => {
 
   // ─── Delete Asset ─────────────────────────────────────────────────────────
   const deleteAsset = async (id) => {
-    if (!window.confirm("Are you sure you want to delete this file?")) return;
+    if (!window.confirm("Are you sure you want to delete this folder or file?")) return;
     try {
       await axios.delete(`${API_URL}/api/assets/${id}`, { withCredentials: true });
       dispatch(removeFile(id));
-      fetchStorageSummary(); // Refresh total storage size
+      fetchStorageSummary();
     } catch (err) {
       console.error("Error deleting asset:", err);
+    }
+  };
+
+  // ─── Collaborator Access Delegation (Sharing Engine) ──────────────────────
+  const handleInviteUser = async (e) => {
+    e.preventDefault();
+    if (!shareEmail.trim() || !shareAsset) return;
+
+    try {
+      const res = await axios.post(`${API_URL}/api/shares/${shareAsset._id}/share`, {
+        email: shareEmail.trim(),
+        role: shareRole
+      }, { withCredentials: true });
+
+      setShareAsset(res.data.asset);
+      dispatch(updateFile(res.data.asset));
+      setShareEmail('');
+      alert(`Shared successfully with ${shareEmail}`);
+    } catch (err) {
+      console.error("Sharing invite failed:", err);
+      alert(err.response?.data?.message || "Failed to share asset");
+    }
+  };
+
+  const handleUpdateLinkAccess = async (accessType) => {
+    if (!shareAsset) return;
+
+    try {
+      const res = await axios.put(`${API_URL}/api/shares/${shareAsset._id}/link-access`, {
+        publicLinkAccess: accessType
+      }, { withCredentials: true });
+
+      setShareAsset(res.data.asset);
+      dispatch(updateFile(res.data.asset));
+      setPublicAccess(accessType);
+    } catch (err) {
+      console.error("Link sharing update failed:", err);
+      alert("Failed to update link sharing access");
     }
   };
 
@@ -393,7 +600,62 @@ const Home = () => {
     return tag.startsWith('#') ? tag.substring(1) : tag;
   };
 
+  // ─── Chat Message Filename Link Parser ────────────────────────────────────
+  const renderChatMessage = (content) => {
+    if (!content || typeof content !== 'string') return content;
+    
+    let elements = [content];
+    
+    files.forEach(file => {
+      if (file.isFolder) return;
+      const escapedName = file.name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const regex = new RegExp(`\\b${escapedName}\\b`, 'g');
+      
+      const newElements = [];
+      elements.forEach(el => {
+        if (typeof el !== 'string') {
+          newElements.push(el);
+          return;
+        }
+        
+        const parts = el.split(regex);
+        if (parts.length === 1) {
+          newElements.push(el);
+        } else {
+          parts.forEach((part, index) => {
+            newElements.push(part);
+            if (index < parts.length - 1) {
+              newElements.push(
+                <span 
+                  key={`${file._id}-${index}`} 
+                  className="chat-file-badge"
+                  onClick={() => {
+                    dispatch(setActiveAssetContext(file));
+                    dispatch(setAnalysisStatus('completed'));
+                    setIsAiOpen(true);
+                  }}
+                >
+                  <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  {file.name}
+                </span>
+              );
+            }
+          });
+        }
+      });
+      elements = newElements;
+    });
+    
+    return elements;
+  };
+
   const activeFileConversation = fileChats[activeAsset?._id] || [];
+  
+  // Separate folder and file arrays
+  const folders = files.filter(f => f.isFolder);
+  const items = files.filter(f => !f.isFolder);
 
   return (
     <div className="dashboard-root">
@@ -433,12 +695,21 @@ const Home = () => {
           <nav className="sidebar-nav">
             <button
               className={`sidebar-nav-item ${activeTab === 'all' && !activeAsset ? 'active' : ''}`}
-              onClick={() => { dispatch(setActiveAssetContext(null)); setActiveTab('all'); }}
+              onClick={() => { dispatch(setActiveAssetContext(null)); navigateToFolder(null); setActiveTab('all'); }}
             >
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
               All Files
+            </button>
+            <button
+              className={`sidebar-nav-item ${activeTab === 'shared' && !activeAsset ? 'active' : ''}`}
+              onClick={() => { dispatch(setActiveAssetContext(null)); setActiveTab('shared'); }}
+            >
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              Shared with me
             </button>
             <button
               className={`sidebar-nav-item ${activeTab === 'image' && !activeAsset ? 'active' : ''}`}
@@ -560,16 +831,20 @@ const Home = () => {
         {/* Dynamic Canvas Workspace */}
         <div className="canvas-content">
           
-          {/* Breadcrumbs navigation */}
+          {/* Breadcrumbs trail */}
           <nav className="breadcrumbs" aria-label="Breadcrumb">
-            <span className="breadcrumb-item" onClick={() => dispatch(setActiveAssetContext(null))}>My Files</span>
-            <span className="breadcrumb-separator">&gt;</span>
-            <span
-              className={`breadcrumb-item ${!activeAsset ? 'active' : ''}`}
-              onClick={() => dispatch(setActiveAssetContext(null))}
-            >
-              Recent Visuals
-            </span>
+            <span className="breadcrumb-item" onClick={() => navigateToFolder(null)}>My Drive</span>
+            {folderPath.map((folder, index) => (
+              <React.Fragment key={folder._id}>
+                <span className="breadcrumb-separator">&gt;</span>
+                <span 
+                  className={`breadcrumb-item ${index === folderPath.length - 1 && !activeAsset ? 'active' : ''}`}
+                  onClick={() => navigateToFolder(folder._id, folder.name)}
+                >
+                  {folder.name}
+                </span>
+              </React.Fragment>
+            ))}
             {activeAsset && (
               <>
                 <span className="breadcrumb-separator">&gt;</span>
@@ -597,7 +872,7 @@ const Home = () => {
                     <h3 className="ai-processing-title">Analyzing Visual Content</h3>
                     <p className="ai-processing-desc">Sahil AI is processing objects, lighting, and metadata...</p>
                     <div className="ai-progress-bar-container">
-                      <div className="ai-progress-bar-bg">
+                       <div className="ai-progress-bar-bg">
                         <div className="ai-progress-bar-fill" style={{ width: `${analysisProgress}%` }}></div>
                       </div>
                       <span className="ai-progress-percentage">{analysisProgress}% Complete</span>
@@ -606,7 +881,7 @@ const Home = () => {
                 )}
 
                 {/* Main Media Preview Render */}
-                {activeAsset.type.startsWith('video/') ? (
+                {activeAsset.type && activeAsset.type.startsWith('video/') ? (
                   <video
                     src={getFileUrl(activeAsset.url)}
                     controls
@@ -629,7 +904,7 @@ const Home = () => {
                   <div className="metadata-panel-content">
                     <span className="metadata-panel-label">File Type</span>
                     <span className="metadata-panel-value">
-                      {activeAsset.type.startsWith('video/') ? 'MP4 Video' : 'JPEG Image'}
+                      {activeAsset.type && activeAsset.type.startsWith('video/') ? 'MP4 Video' : 'JPEG Image'}
                     </span>
                     <span className="metadata-panel-subvalue">({formatBytes(activeAsset.size)})</span>
                   </div>
@@ -645,7 +920,7 @@ const Home = () => {
                     <span className="metadata-panel-label">Resolution</span>
                     <span className="metadata-panel-value">{activeAsset.resolution || "Unknown"}</span>
                     <span className="metadata-panel-subvalue">
-                      {activeAsset.type.startsWith('video/') ? '(1080p)' : '(4K)'}
+                      {activeAsset.type && activeAsset.type.startsWith('video/') ? '(1080p)' : '(4K)'}
                     </span>
                   </div>
                 </div>
@@ -672,8 +947,45 @@ const Home = () => {
             </div>
           ) : (
             
-            /* ─── CASE B: Explorer grid layout of files ─────────────────────── */
+            /* ─── CASE B: Explorer layout of files & folders ─────────────────── */
             <>
+              {/* Toolbar Section (View toggles and New Folder) */}
+              <div className="toolbar-row">
+                <div className="action-bar-left">
+                  {activeTab === 'all' && (
+                    <button className="new-folder-btn" onClick={() => setIsCreateFolderOpen(true)}>
+                      <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
+                      New Folder
+                    </button>
+                  )}
+                </div>
+                
+                <div className="view-toggle-btns">
+                  <button 
+                    className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
+                    onClick={() => setViewMode('grid')}
+                    title="Grid view"
+                  >
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                    </svg>
+                    Grid
+                  </button>
+                  <button 
+                    className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
+                    onClick={() => setViewMode('list')}
+                    title="List view"
+                  >
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                    </svg>
+                    List
+                  </button>
+                </div>
+              </div>
+
               {files.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-icon">
@@ -682,89 +994,312 @@ const Home = () => {
                     </svg>
                   </div>
                   <h3 className="empty-title">No assets found</h3>
-                  <p className="empty-desc">Upload files to start analyzing and storing your media with AI power.</p>
+                  <p className="empty-desc">Upload files or create folders to start storing and organizing media with AI power.</p>
                 </div>
               ) : (
-                <div className="files-grid">
-                  {files.map(file => (
-                    <article className="file-card" key={file._id} aria-label={`File card for ${file.name}`}>
-                      
-                      {/* Media preview card block */}
-                      <div className="file-thumbnail-container">
-                        {file.type.startsWith('video/') ? (
-                          <>
-                            <div className="file-video-icon-wrapper">
-                              <svg width="22" height="22" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M8 5v14l11-7z" />
-                              </svg>
-                            </div>
-                            <span className="video-duration">02:14</span>
-                          </>
-                        ) : (
-                          <img src={getFileUrl(file.url)} alt={file.name} className="file-thumbnail" />
-                        )}
-
-                        {/* Hover Actions Menu overlay */}
-                        <div className="file-card-overlay">
-                          <button
-                            className="overlay-action-btn ai"
-                            onClick={() => {
-                              dispatch(setActiveAssetContext(file));
-                              dispatch(setAnalysisStatus('completed'));
-                              setIsAiOpen(true);
-                            }}
-                          >
-                            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                            </svg>
-                            Analyze with AI
-                          </button>
-                          <a
-                            href={getFileUrl(file.url)}
-                            download={file.name}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="overlay-action-btn download"
-                            style={{ textDecoration: 'none' }}
-                          >
-                            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                            </svg>
-                            Download
-                          </a>
-                          <button className="overlay-action-btn delete" onClick={() => deleteAsset(file._id)}>
-                            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* File details info bar */}
-                      <div className="file-info">
-                        <div className="file-name-row">
-                          <span className="file-name-text" title={file.name}>{file.name}</span>
-                          <button
-                            className={`favorite-btn ${file.isFavorite ? 'active' : ''}`}
-                            onClick={() => toggleFavorite(file._id)}
-                            aria-label={file.isFavorite ? "Remove from favorites" : "Add to favorites"}
-                          >
-                            <svg width="16" height="16" fill={file.isFavorite ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.907c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.906a1 1 0 00.95-.69l1.519-4.674z" />
-                            </svg>
-                          </button>
-                        </div>
-                        <div className="file-tags-row">
-                          {file.tags && file.tags.slice(0, 3).map((tag, idx) => (
-                            <span className="file-tag-badge" key={idx}>{cleanTag(tag)}</span>
+                <>
+                  {viewMode === 'list' ? (
+                    /* ─── List View (Table Structure) ─── */
+                    <div className="list-view-container">
+                      <table className="list-view-table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Size</th>
+                            <th>Modified</th>
+                            <th>Tags</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {/* Folders first */}
+                          {folders.map(folder => (
+                            <tr 
+                              key={folder._id} 
+                              className="list-view-row"
+                              onDoubleClick={() => navigateToFolder(folder._id, folder.name)}
+                            >
+                              <td>
+                                <div className="list-item-name-cell">
+                                  <span className="list-item-icon folder">
+                                    <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24">
+                                      <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+                                    </svg>
+                                  </span>
+                                  <span className="list-item-name-text" title={folder.name}>{folder.name}</span>
+                                </div>
+                              </td>
+                              <td>Folder</td>
+                              <td>--</td>
+                              <td>{new Date(folder.updatedAt).toLocaleDateString()}</td>
+                              <td>--</td>
+                              <td>
+                                <div className="list-action-btns">
+                                  <button 
+                                    className="list-action-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setShareAsset(folder);
+                                      setPublicAccess(folder.publicLinkAccess || 'restricted');
+                                      setShareEmail('');
+                                      setShareRole('viewer');
+                                      setIsShareModalOpen(true);
+                                    }}
+                                    title="Share"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 10.742l-2.777 1.111m0 0A3.001 3.001 0 113 7.5m3.41 5.5h2.18m2.18 0l2.777-1.11m0 0a3 3 0 10-5.556-1.03l2.777 1.111M21 16.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                  </button>
+                                  <button 
+                                    className="list-action-btn delete"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      deleteAsset(folder._id);
+                                    }}
+                                    title="Delete"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
                           ))}
+                          
+                          {/* Files next */}
+                          {items.map(file => (
+                            <tr 
+                              key={file._id} 
+                              className="list-view-row"
+                              onDoubleClick={() => {
+                                dispatch(setActiveAssetContext(file));
+                                dispatch(setAnalysisStatus('completed'));
+                                setIsAiOpen(true);
+                              }}
+                            >
+                              <td>
+                                <div className="list-item-name-cell">
+                                  <span className="list-item-icon file">
+                                    <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                  </span>
+                                  <span className="list-item-name-text" title={file.name}>{file.name}</span>
+                                </div>
+                              </td>
+                              <td>{file.type ? file.type.split('/')[1]?.toUpperCase() : 'FILE'}</td>
+                              <td>{formatBytes(file.size)}</td>
+                              <td>{new Date(file.updatedAt).toLocaleDateString()}</td>
+                              <td>
+                                <div className="list-item-tags">
+                                  {file.tags && file.tags.slice(0, 3).map((tag, idx) => (
+                                    <span className="list-item-tag-badge" key={idx}>{cleanTag(tag)}</span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="list-action-btns">
+                                  <button 
+                                    className="list-action-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      dispatch(setActiveAssetContext(file));
+                                      dispatch(setAnalysisStatus('completed'));
+                                      setIsAiOpen(true);
+                                    }}
+                                    title="Analyze with AI"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                  </button>
+                                  <a 
+                                    href={getFileUrl(file.url)}
+                                    download={file.name}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="list-action-btn"
+                                    onClick={(e) => e.stopPropagation()}
+                                    title="Download"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                    </svg>
+                                  </a>
+                                  <button 
+                                    className="list-action-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setShareAsset(file);
+                                      setPublicAccess(file.publicLinkAccess || 'restricted');
+                                      setShareEmail('');
+                                      setShareRole('viewer');
+                                      setIsShareModalOpen(true);
+                                    }}
+                                    title="Share"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 10.742l-2.777 1.111m0 0A3.001 3.001 0 113 7.5m3.41 5.5h2.18m2.18 0l2.777-1.11m0 0a3 3 0 10-5.556-1.03l2.777 1.111M21 16.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                  </button>
+                                  <button 
+                                    className="list-action-btn delete"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      deleteAsset(file._id);
+                                    }}
+                                    title="Delete"
+                                  >
+                                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    /* ─── Grid View (Card Structure) ─── */
+                    <>
+                      {folders.length > 0 && (
+                        <div>
+                          <h4 className="folders-section-title">Folders</h4>
+                          <div className="folders-grid">
+                            {folders.map(folder => (
+                              <div 
+                                className="folder-card" 
+                                key={folder._id}
+                                onDoubleClick={() => navigateToFolder(folder._id, folder.name)}
+                              >
+                                <div className="folder-icon">
+                                  <svg width="24" height="24" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+                                  </svg>
+                                </div>
+                                <span className="folder-name" title={folder.name}>{folder.name}</span>
+                                <button 
+                                  className="folder-action-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setShareAsset(folder);
+                                    setPublicAccess(folder.publicLinkAccess || 'restricted');
+                                    setShareEmail('');
+                                    setShareRole('viewer');
+                                    setIsShareModalOpen(true);
+                                  }}
+                                  title="Share Folder"
+                                >
+                                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 10.742l-2.777 1.111m0 0A3.001 3.001 0 113 7.5m3.41 5.5h2.18m2.18 0l2.777-1.11m0 0a3 3 0 10-5.556-1.03l2.777 1.111M21 16.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  </svg>
+                                </button>
+                                <button 
+                                  className="folder-action-btn delete"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteAsset(folder._id);
+                                  }}
+                                  title="Delete Folder"
+                                >
+                                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
+                      )}
 
-                    </article>
-                  ))}
-                </div>
+                      {items.length > 0 && (
+                        <div>
+                          <h4 className="folders-section-title">Files</h4>
+                          <div className="files-grid">
+                            {items.map(file => (
+                              <article className="file-card" key={file._id} aria-label={`File card for ${file.name}`}>
+                                <div className="file-thumbnail-container">
+                                  {file.type && file.type.startsWith('video/') ? (
+                                    <>
+                                      <div className="file-video-icon-wrapper">
+                                        <svg width="22" height="22" fill="currentColor" viewBox="0 0 24 24">
+                                          <path d="M8 5v14l11-7z" />
+                                        </svg>
+                                      </div>
+                                      <span className="video-duration">02:14</span>
+                                    </>
+                                  ) : (
+                                    <img src={getFileUrl(file.url)} alt={file.name} className="file-thumbnail" />
+                                  )}
+
+                                  <div className="file-card-overlay">
+                                    <button
+                                      className="overlay-action-btn ai"
+                                      onClick={() => {
+                                        dispatch(setActiveAssetContext(file));
+                                        dispatch(setAnalysisStatus('completed'));
+                                        setIsAiOpen(true);
+                                      }}
+                                    >
+                                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                      </svg>
+                                      Analyze with AI
+                                    </button>
+                                    <a
+                                      href={getFileUrl(file.url)}
+                                      download={file.name}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="overlay-action-btn download"
+                                      style={{ textDecoration: 'none' }}
+                                    >
+                                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                      </svg>
+                                      Download
+                                    </a>
+                                    <button className="overlay-action-btn delete" onClick={() => deleteAsset(file._id)}>
+                                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                      </svg>
+                                      Delete
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="file-info">
+                                  <div className="file-name-row">
+                                    <span className="file-name-text" title={file.name}>{file.name}</span>
+                                    <button
+                                      className={`favorite-btn ${file.isFavorite ? 'active' : ''}`}
+                                      onClick={() => toggleFavorite(file._id)}
+                                      aria-label={file.isFavorite ? "Remove from favorites" : "Add to favorites"}
+                                    >
+                                      <svg width="16" height="16" fill={file.isFavorite ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.907c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.906a1 1 0 00.95-.69l1.519-4.674z" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                  <div className="file-tags-row">
+                                    {file.tags && file.tags.slice(0, 3).map((tag, idx) => (
+                                      <span className="file-tag-badge" key={idx}>{cleanTag(tag)}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
               )}
             </>
           )}
@@ -810,25 +1345,27 @@ const Home = () => {
             <div className="drawer-scroll-content">
               
               {/* Suggested Tags chips section */}
-              <div>
-                <h4 className="drawer-section-title">Suggested Tags</h4>
-                <div className="drawer-chips-container">
-                  {activeAsset.tags.map((tag, idx) => (
-                    <button
-                      key={idx}
-                      className={`drawer-tag-chip ${checkedTags[tag] ? 'active-sparkle' : ''}`}
-                      onClick={() => setCheckedTags(prev => ({ ...prev, [tag]: !prev[tag] }))}
-                    >
-                      {cleanTag(tag)}
-                      {checkedTags[tag] && (
-                        <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </button>
-                  ))}
+              {activeAsset.tags && activeAsset.tags.length > 0 && (
+                <div>
+                  <h4 className="drawer-section-title">Suggested Tags</h4>
+                  <div className="drawer-chips-container">
+                    {activeAsset.tags.map((tag, idx) => (
+                      <button
+                        key={idx}
+                        className={`drawer-tag-chip ${checkedTags[tag] ? 'active-sparkle' : ''}`}
+                        onClick={() => setCheckedTags(prev => ({ ...prev, [tag]: !prev[tag] }))}
+                      >
+                        {cleanTag(tag)}
+                        {checkedTags[tag] && (
+                          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Smart Summary card section */}
               <div>
@@ -951,7 +1488,9 @@ const Home = () => {
                     <span className={`bubble-role-badge ${msg.type}`}>
                       {msg.type === 'user' ? 'SA' : 'Sahil AI'}
                     </span>
-                    {msg.content}
+                    <div className="bubble-content-text">
+                      {renderChatMessage(msg.content)}
+                    </div>
                   </div>
                 ))
               )}
@@ -962,21 +1501,21 @@ const Home = () => {
             <div className="quick-chips-wrapper">
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Analyze my uploaded sunset beach image file details.")); }}
+                onClick={() => { dispatch(setInput("Find similar visual assets inside my active folder context.")); }}
               >
-                Describe this image
+                Summarize Folder
               </button>
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Transcribe product_demo.mp4 file details and summarize actions.")); }}
+                onClick={() => { dispatch(setInput("/summarize sunset_beach.jpg")); }}
               >
-                Transcribe video
+                /summarize sunset_beach.jpg
               </button>
               <button
                 className="quick-chip-btn"
-                onClick={() => { dispatch(setInput("Find similar urban cityscape files in my cloud storage index.")); }}
+                onClick={() => { dispatch(setInput("Explain what files are currently in this folder.")); }}
               >
-                Find similar files
+                What's in here?
               </button>
             </div>
 
@@ -1003,12 +1542,163 @@ const Home = () => {
                   </svg>
                 </button>
               </div>
-              <span className="chat-input-footer-hint">Enter ↵ to send • Shift+Enter = newline</span>
+              <span className="chat-input-footer-hint">Enter ↵ to send • Type /summarize [filename]</span>
             </div>
           </div>
         )}
 
       </aside>
+
+      {/* ───────────────────────────────────────────────────────────────────────
+         4. Create Folder Modal Dialog
+         ─────────────────────────────────────────────────────────────────────── */}
+      {isCreateFolderOpen && (
+        <div className="modal-overlay" onClick={() => setIsCreateFolderOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Create Folder</span>
+              <button className="modal-close-btn" onClick={() => setIsCreateFolderOpen(false)}>×</button>
+            </div>
+            <form onSubmit={handleCreateFolder}>
+              <div className="modal-body">
+                <div className="form-group">
+                  <label className="form-label" htmlFor="folderName">Folder Name</label>
+                  <input
+                    type="text"
+                    id="folderName"
+                    className="form-input"
+                    placeholder="New Folder"
+                    value={folderNameInput}
+                    onChange={(e) => setFolderNameInput(e.target.value)}
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="btn-secondary" onClick={() => setIsCreateFolderOpen(false)}>Cancel</button>
+                <button type="submit" className="btn-primary">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ───────────────────────────────────────────────────────────────────────
+         5. Access Delegation (Sharing Permissions) Modal
+         ─────────────────────────────────────────────────────────────────────── */}
+      {isShareModalOpen && shareAsset && (
+        <div className="modal-overlay" onClick={() => setIsShareModalOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title" style={{ maxWidth: '320px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                Share "{shareAsset.name}"
+              </span>
+              <button className="modal-close-btn" onClick={() => setIsShareModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              {/* Invite User Form */}
+              <form onSubmit={handleInviteUser} className="form-group">
+                <label className="form-label">Add people by email</label>
+                <div className="invite-input-row">
+                  <input
+                    type="email"
+                    className="form-input"
+                    placeholder="user@example.com"
+                    value={shareEmail}
+                    onChange={(e) => setShareEmail(e.target.value)}
+                    required
+                  />
+                  <select 
+                    className="form-select" 
+                    value={shareRole} 
+                    onChange={(e) => setShareRole(e.target.value)}
+                    style={{ padding: '0.5rem', fontSize: '0.8rem' }}
+                  >
+                    <option value="viewer">Viewer</option>
+                    <option value="commenter">Commenter</option>
+                    <option value="editor">Editor</option>
+                  </select>
+                  <button type="submit" className="btn-primary" style={{ padding: '0.5rem 1rem' }}>Invite</button>
+                </div>
+              </form>
+
+              {/* Shared Users List */}
+              {shareAsset.sharedUsers && shareAsset.sharedUsers.length > 0 && (
+                <div className="share-section">
+                  <span className="share-section-title">People with access</span>
+                  <div className="shared-users-list">
+                    {shareAsset.sharedUsers.map((item, idx) => (
+                      <div className="shared-user-item" key={idx}>
+                        <span className="shared-user-email">{item.email}</span>
+                        <span className="shared-user-role">{item.role}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Public Link Sharing configuration */}
+              <div className="share-section" style={{ borderTop: '1px solid var(--color-border-dark)', paddingTop: '1rem' }}>
+                <span className="share-section-title">General Link Access</span>
+                <div className="form-group" style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)' }}>
+                    Anyone with the link can:
+                  </span>
+                  <select
+                    className="form-select"
+                    value={publicAccess}
+                    onChange={(e) => handleUpdateLinkAccess(e.target.value)}
+                    style={{ padding: '0.5rem', fontSize: '0.8rem' }}
+                  >
+                    <option value="restricted">Restricted (Owner only)</option>
+                    <option value="view">View</option>
+                    <option value="comment">Comment</option>
+                    <option value="edit">Edit</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button className="btn-primary" onClick={() => setIsShareModalOpen(false)}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ───────────────────────────────────────────────────────────────────────
+         6. Floating Sequential Chunk Upload Progress Monitor
+         ─────────────────────────────────────────────────────────────────────── */}
+      {activeUploads.length > 0 && (
+        <div className="upload-monitor-card">
+          <div className="upload-monitor-header">
+            <span>Uploading {activeUploads.length} item{activeUploads.length > 1 ? 's' : ''}</span>
+            <button className="upload-monitor-close" onClick={() => setActiveUploads([])}>×</button>
+          </div>
+          <div className="upload-monitor-list">
+            {activeUploads.map(up => (
+              <div className="upload-monitor-item" key={up.id}>
+                <div className="upload-monitor-item-info">
+                  <span className="upload-monitor-item-name" title={up.name}>{up.name}</span>
+                  <span className="upload-monitor-item-status">
+                    {up.status === 'failed' ? (
+                      <span className="text-red">Failed</span>
+                    ) : (
+                      `${up.progress}% ${up.totalChunks > 1 ? `(chunk ${up.chunksUploaded}/${up.totalChunks})` : ''}`
+                    )}
+                  </span>
+                </div>
+                <div className="upload-monitor-progress-bar-bg">
+                  <div 
+                    className={`upload-monitor-progress-bar-fill ${up.status === 'failed' ? 'failed' : ''}`}
+                    style={{ width: `${up.progress}%` }}
+                  ></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
     </div>
   );

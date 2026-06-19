@@ -61,6 +61,8 @@ async function uploadAsset(req, res) {
         // Relative path exposed statically
         const url = `/uploads/${req.file.filename}`;
 
+        const parentFolderId = req.body.parentFolderId;
+
         // Call Gemini to generate tags, summary, dominant colors, and resolution
         const analysis = await aiService.analyzeAsset(name, type, size);
 
@@ -73,7 +75,9 @@ async function uploadAsset(req, res) {
             tags: analysis.tags || [],
             summary: analysis.summary || "",
             colors: analysis.colors || [],
-            resolution: analysis.resolution || "Unknown"
+            resolution: analysis.resolution || "Unknown",
+            parentFolderId: (parentFolderId && parentFolderId !== 'null' && parentFolderId !== 'undefined') ? parentFolderId : null,
+            mimeType: type
         });
 
         res.status(201).json({
@@ -89,36 +93,43 @@ async function uploadAsset(req, res) {
 async function getAssets(req, res) {
     try {
         const user = req.user;
-        const { type, favorite, search } = req.query;
+        const { type, favorite, search, parentFolderId } = req.query;
 
         let query = { user: user._id };
 
         if (type === 'image') {
             query.type = { $regex: '^image/', $options: 'i' };
+            query.isFolder = false;
         } else if (type === 'video') {
             query.type = { $regex: '^video/', $options: 'i' };
-        }
-
-        if (favorite === 'true') {
+            query.isFolder = false;
+        } else if (favorite === 'true') {
             query.isFavorite = true;
-        }
-
-        if (search) {
+        } else if (search) {
             query.$or = [
                 { name: { $regex: search, $options: 'i' } },
                 { tags: { $regex: search, $options: 'i' } }
             ];
+        } else {
+            // Folder level filtering
+            if (parentFolderId && parentFolderId !== 'null' && parentFolderId !== 'undefined') {
+                query.parentFolderId = parentFolderId;
+            } else {
+                query.parentFolderId = null;
+            }
         }
 
         let assets = await assetModel.find(query).sort({ createdAt: -1 });
 
-        // Auto-seed if no assets exist for this user in general
-        if (assets.length === 0 && !type && !favorite && !search) {
+        // Auto-seed if no assets exist for this user in general (root folder)
+        if (assets.length === 0 && !type && !favorite && !search && (!parentFolderId || parentFolderId === 'null' || parentFolderId === 'undefined')) {
             const userAssetsCount = await assetModel.countDocuments({ user: user._id });
             if (userAssetsCount === 0) {
                 const seeded = SEED_ASSETS.map(asset => ({
                     ...asset,
-                    user: user._id
+                    user: user._id,
+                    parentFolderId: null,
+                    mimeType: asset.type
                 }));
                 await assetModel.insertMany(seeded);
                 assets = await assetModel.find(query).sort({ createdAt: -1 });
@@ -219,9 +230,16 @@ async function chatAsset(req, res) {
             return res.status(400).json({ message: "Message is required" });
         }
 
-        const asset = await assetModel.findOne({ _id: id, user: user._id });
+        const asset = await assetModel.findOne({
+            _id: id,
+            $or: [
+                { user: user._id },
+                { "sharedUsers.userId": user._id },
+                { publicLinkAccess: { $in: ['view', 'comment', 'edit'] } }
+            ]
+        });
         if (!asset) {
-            return res.status(404).json({ message: "Asset not found" });
+            return res.status(404).json({ message: "Asset not found or access denied" });
         }
 
         const contextMessages = [
@@ -255,11 +273,42 @@ Please answer questions specifically about this file. Keep the answers concise a
     }
 }
 
+async function createFolder(req, res) {
+    try {
+        const user = req.user;
+        const { name, parentFolderId } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ message: "Folder name is required" });
+        }
+
+        const folder = await assetModel.create({
+            user: user._id,
+            name,
+            type: "application/vnd.google-apps.folder",
+            mimeType: "application/vnd.google-apps.folder",
+            isFolder: true,
+            parentFolderId: (parentFolderId && parentFolderId !== 'null' && parentFolderId !== 'undefined') ? parentFolderId : null,
+            size: 0,
+            url: ""
+        });
+
+        res.status(201).json({
+            message: "Folder created successfully",
+            folder
+        });
+    } catch (err) {
+        console.error("Create Folder error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
 module.exports = {
     uploadAsset,
     getAssets,
     toggleFavorite,
     deleteAsset,
     getStorageSummary,
-    chatAsset
+    chatAsset,
+    createFolder
 };
