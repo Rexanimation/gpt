@@ -1,22 +1,25 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk");
 const { HfInference } = require("@huggingface/inference");
 const assetModel = require("../models/asset.model");
 const userModel = require("../models/user.model");
 
-// Initialize Gemini
-let genAI = null;
-if (process.env.GEMINI_API_KEY) {
+// Initialize Groq
+let groq = null;
+if (process.env.GROQ_API_KEY) {
     try {
-        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     } catch (err) {
-        console.error("[AI] Failed to initialize Gemini SDK:", err.message);
+        console.error("[AI] Failed to initialize Groq SDK:", err.message);
     }
 } else {
-    console.warn("[AI] GEMINI_API_KEY is not defined in the environment.");
+    console.warn("[AI] GROQ_API_KEY is not defined in the environment.");
 }
 
 // Initialize Hugging Face for Embeddings (pinecone dependency)
 const hf = new HfInference(process.env.HF_API_KEY);
+
+// Groq Model configuration
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 // System Prompt for Sahil AI
 const SYSTEM_PROMPT = `
@@ -27,11 +30,11 @@ Current context: Use the current date and time for any queries about "recent vis
 Always answer questions concisely and structure replies with clean markdown.
 `;
 
-// Helper to convert conversation history into Gemini SDK format
-function toGeminiHistory(contents) {
+// Helper to convert conversation history into Groq chat history format
+function toGroqHistory(contents) {
     if (!Array.isArray(contents)) return [];
     return contents.map(item => {
-        const role = item.role === "assistant" || item.role === "model" ? "model" : "user";
+        const role = (item.role === "assistant" || item.role === "model") ? "assistant" : "user";
         let text = "";
         if (Array.isArray(item.parts)) {
             text = item.parts.map(p => p.text).join("");
@@ -40,16 +43,16 @@ function toGeminiHistory(contents) {
         }
         return {
             role,
-            parts: [{ text }]
+            content: text
         };
     });
 }
 
-// Generate Chat Response using Gemini with Function Calling (Tools)
+// Generate Chat Response using Groq with Function Calling (Tools)
 async function generateResponse(content, folderContextString = "", context = {}) {
     try {
-        if (!genAI) {
-            throw new Error("Gemini API key is not configured.");
+        if (!groq) {
+            throw new Error("Groq API key is not configured.");
         }
 
         let systemInstruction = SYSTEM_PROMPT;
@@ -57,87 +60,105 @@ async function generateResponse(content, folderContextString = "", context = {})
             systemInstruction += `\n\n[Active Directory Context]\nThe user is currently browsing a folder containing these files:\n${folderContextString}`;
         }
 
+        const messages = [
+            { role: "system", content: systemInstruction },
+            ...toGroqHistory(content)
+        ];
+
+        if (messages.length === 1) {
+            return "Hello! I am Sahil AI. How can I assist you with your files today?";
+        }
+
         // Define tools for Sahil GPT project controller
         const tools = [
             {
-                functionDeclarations: [
-                    {
-                        name: "create_folder",
-                        description: "Create a new folder (directory) in the cloud drive.",
-                        parameters: {
-                            type: "OBJECT",
-                            properties: {
-                                name: { type: "STRING", description: "The folder name to create." },
-                                parentFolderId: { type: "STRING", description: "The parent folder ID (optional). If not provided, it will create in the current directory." }
-                            },
-                            required: ["name"]
-                        }
-                    },
-                    {
-                        name: "get_storage_summary",
-                        description: "Get user's storage usage details, limit, and remaining quota.",
-                        parameters: {
-                            type: "OBJECT",
-                            properties: {}
-                        }
-                    },
-                    {
-                        name: "find_unused_files",
-                        description: "Search for unused, non-favorite, or large files that can be suggested for deletion.",
-                        parameters: {
-                            type: "OBJECT",
-                            properties: {}
-                        }
+                type: "function",
+                function: {
+                    name: "create_folder",
+                    description: "Create a new folder (directory) in the cloud drive.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            name: { type: "string", description: "The folder name to create." },
+                            parentFolderId: { type: "string", description: "The parent folder ID (optional). If not provided, it will create in the current directory." }
+                        },
+                        required: ["name"]
                     }
-                ]
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "get_storage_summary",
+                    description: "Get user's storage usage details, limit, and remaining quota.",
+                    parameters: {
+                        type: "object",
+                        properties: {}
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "find_unused_files",
+                    description: "Search for unused, non-favorite, or large files that can be suggested for deletion.",
+                    parameters: {
+                        type: "object",
+                        properties: {}
+                    }
+                }
             }
         ];
 
-        const model = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
-            systemInstruction,
-            tools: tools
+        let response = await groq.chat.completions.create({
+            model: GROQ_MODEL,
+            messages: messages,
+            tools: tools,
+            tool_choice: "auto"
         });
 
-        const chatMessages = toGeminiHistory(content);
-        
-        // Split history from the latest message
-        if (chatMessages.length === 0) {
-            return "Hello! I am Sahil AI. How can I assist you with your files today?";
-        }
-        
-        const latestMessage = chatMessages.pop();
-        const chat = model.startChat({
-            history: chatMessages
-        });
+        let responseMessage = response.choices[0].message;
 
-        let result = await chat.sendMessage(latestMessage.parts[0].text);
-        
-        // Process function calls sequentially if requested by Gemini
-        let calls = result.response.functionCalls();
-        while (calls && calls.length > 0) {
-            const functionResponses = [];
-            for (const call of calls) {
-                const toolOutput = await executeLocalTool(call.name, call.args, context);
-                functionResponses.push({
-                    functionResponse: {
-                        name: call.name,
-                        response: toolOutput
-                    }
+        // Process function calls sequentially if requested by Groq
+        while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+            messages.push(responseMessage);
+
+            for (const toolCall of responseMessage.tool_calls) {
+                const name = toolCall.function.name;
+                let args = {};
+                try {
+                    args = JSON.parse(toolCall.function.arguments);
+                } catch (e) {
+                    console.error("[Groq] Failed to parse tool arguments:", toolCall.function.arguments);
+                }
+
+                console.log(`[Groq Tool Call] Executing tool ${name} with args:`, args);
+                const toolOutput = await executeLocalTool(name, args, context);
+
+                messages.push({
+                    role: "tool",
+                    tool_call_id: toolCall.id,
+                    name: name,
+                    content: JSON.stringify(toolOutput)
                 });
             }
-            result = await chat.sendMessage(functionResponses);
-            calls = result.response.functionCalls();
+
+            response = await groq.chat.completions.create({
+                model: GROQ_MODEL,
+                messages: messages,
+                tools: tools
+            });
+            responseMessage = response.choices[0].message;
         }
 
-        return result.response.text();
+        return responseMessage.content || "";
     } catch (error) {
-        console.error("[Gemini] generateResponse error:", error.message);
-        return "Sorry, I encountered an issue generating a response. Please verify that your GEMINI_API_KEY is configured correctly.";
+        console.error("[Groq] generateResponse error:", error.message);
+        return "Sorry, I encountered an issue generating a response. Please verify that your GROQ_API_KEY is configured correctly.";
     }
 }
 
-// Local helper to execute Gemini functions on backend Mongoose models
+// Local helper to execute functions on backend Mongoose models
 async function executeLocalTool(name, args, context) {
     const { userId, parentFolderId, socket } = context;
     if (!userId) {
@@ -227,10 +248,9 @@ async function executeLocalTool(name, args, context) {
 // Analyze File Details (generate tags, summaries, colors, and resolutions)
 async function analyzeAsset(fileName, fileType, fileSize) {
     try {
-        if (!genAI) {
-            throw new Error("Gemini API key is not configured.");
+        if (!groq) {
+            throw new Error("Groq API key is not configured.");
         }
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
         const prompt = `Analyze this file metadata for a cloud storage platform (Sahil Drive).
 File Name: ${fileName}
@@ -245,8 +265,18 @@ Provide a JSON response containing:
 
 Respond ONLY with the JSON object. Do not include markdown formatting or wrappers.`;
 
-        const result = await model.generateContent(prompt);
-        let text = result.response.text().trim();
+        const response = await groq.chat.completions.create({
+            model: GROQ_MODEL,
+            messages: [
+                {
+                    role: "user",
+                    content: prompt
+                }
+            ],
+            response_format: { type: "json_object" }
+        });
+
+        let text = response.choices[0].message.content.trim();
 
         // Strip markdown code block markers if present
         if (text.startsWith("```json")) {
@@ -262,16 +292,17 @@ Respond ONLY with the JSON object. Do not include markdown formatting or wrapper
 
         return JSON.parse(text);
     } catch (error) {
-        console.error("[Gemini] analyzeAsset error:", error.message);
+        console.error("[Groq] analyzeAsset error:", error.message);
         const isVideo = fileType.startsWith("video/");
         return {
-            tags: isVideo ? ["#Demo", "#Clip", "#Video"] : ["#Image", "#Visual", "#Asset"],
+            tags: isVideo ? ["Demo", "Clip", "Video"] : ["Image", "Visual", "Asset"],
             summary: `This is an uploaded file named ${fileName}. Sahil AI detects standard parameters.`,
             colors: ["#06B6D4", "#7C3AED"],
             resolution: isVideo ? "1920 x 1080 (1080p)" : "3840 x 2160 (4K)"
         };
     }
 }
+
 
 // Embeddings Generation for Pinecone Long-Term Memory
 async function generateVector(content) {
