@@ -2,7 +2,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const assetModel = require('../models/asset.model');
+const userModel = require('../models/user.model');
 const aiService = require('../services/ai.service');
+const megaService = require('../services/mega.service');
 
 const tempUploadsDir = path.join(__dirname, '../../public/temp_uploads');
 const uploadsDir = path.join(__dirname, '../../public/uploads');
@@ -20,6 +22,15 @@ async function initiateUpload(req, res) {
         const { name, size, type } = req.body;
         if (!name || !size) {
             return res.status(400).json({ message: "File name and size are required" });
+        }
+
+        const userRecord = await userModel.findById(req.user.id);
+        if (!userRecord) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        if (userRecord.usedStorage + size > userRecord.storageQuota) {
+            return res.status(403).json({ message: "Quota exceeded: You do not have enough storage space left." });
         }
 
         const uploadId = crypto.randomUUID();
@@ -73,6 +84,15 @@ async function finalizeUpload(req, res) {
             return res.status(400).json({ message: "Missing required compilation parameters" });
         }
 
+        // Quota double check
+        const userRecord = await userModel.findById(user._id);
+        if (!userRecord) {
+            return res.status(404).json({ message: "User not found" });
+        }
+        if (userRecord.usedStorage + size > userRecord.storageQuota) {
+            return res.status(403).json({ message: "Quota exceeded: You do not have enough storage space left." });
+        }
+
         const uploadFolder = path.join(tempUploadsDir, uploadId);
         if (!fs.existsSync(uploadFolder)) {
             return res.status(404).json({ message: "Upload session not found" });
@@ -106,17 +126,29 @@ async function finalizeUpload(req, res) {
         // Clean up temporary chunks
         fs.rmSync(uploadFolder, { recursive: true, force: true });
 
-        const url = `/uploads/${finalFileName}`;
+        // Upload to MEGA
+        let megaHandle = "";
+        let finalUrl = "";
+        try {
+            const fileData = fs.readFileSync(finalFilePath);
+            megaHandle = await megaService.uploadFile(name, size, fileData);
+            fs.unlinkSync(finalFilePath);
+        } catch (megaErr) {
+            console.warn("[MEGA] Chunk compilation upload failed, falling back to local file:", megaErr.message);
+            finalUrl = `/uploads/${finalFileName}`;
+        }
 
         // Call Gemini to generate tags, summary, dominant colors, and resolution
         const analysis = await aiService.analyzeAsset(name, type, size);
 
         const asset = await assetModel.create({
             user: user._id,
+            userId: user._id,
             name,
             type,
             size,
-            url,
+            url: finalUrl,
+            megaHandle,
             tags: analysis.tags || [],
             summary: analysis.summary || "",
             colors: analysis.colors || [],
@@ -125,6 +157,15 @@ async function finalizeUpload(req, res) {
             mimeType: type,
             isFolder: false
         });
+
+        if (megaHandle) {
+            asset.url = `/api/assets/stream/${asset._id}`;
+            await asset.save();
+        }
+
+        // Update user storage
+        userRecord.usedStorage += size;
+        await userRecord.save();
 
         res.status(201).json({
             message: "Upload finalized and analyzed successfully",

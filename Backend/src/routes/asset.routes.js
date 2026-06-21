@@ -23,6 +23,9 @@ router.put('/:id/favorite', authMiddleware.authUser, assetController.toggleFavor
 /* DELETE /api/assets/:id */
 router.delete('/:id', authMiddleware.authUser, assetController.deleteAsset);
 
+/* GET /api/assets/stream/:id */
+router.get('/stream/:id', authMiddleware.authUser, assetController.streamAsset);
+
 /* POST /api/assets/:id/chat */
 router.post('/:id/chat', authMiddleware.authUser, assetController.chatAsset);
 

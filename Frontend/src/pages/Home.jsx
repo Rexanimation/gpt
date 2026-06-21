@@ -50,6 +50,53 @@ const Home = () => {
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [socket, setSocket] = useState(null);
   const [storageBytes, setStorageBytes] = useState(0);
+  
+  // Voice interface state
+  const [isListening, setIsListening] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const ttsEnabledRef = useRef(true);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    ttsEnabledRef.current = ttsEnabled;
+  }, [ttsEnabled]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = 'en-US';
+
+      rec.onstart = () => {
+        setIsListening(true);
+      };
+
+      rec.onend = () => {
+        setIsListening(false);
+      };
+
+      rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        dispatch(setInput(transcript));
+      };
+
+      recognitionRef.current = rec;
+    }
+  }, [dispatch]);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert("Speech recognition is not supported in this browser. Please try Google Chrome.");
+      return;
+    }
+    if (isListening) {
+      recognitionRef.current.stop();
+    } else {
+      recognitionRef.current.start();
+    }
+  };
 
   // General Chat Messages
   const [generalMessages, setGeneralMessages] = useState([]);
@@ -186,6 +233,12 @@ const Home = () => {
         content: messagePayload.content
       }]);
       dispatch(sendingFinished());
+
+      if (window.speechSynthesis && ttsEnabledRef.current) {
+        const plainText = messagePayload.content.replace(/[\#\*\_`\[\]\(\)\-\+]/g, '');
+        const utterance = new SpeechSynthesisUtterance(plainText);
+        window.speechSynthesis.speak(utterance);
+      }
     });
 
     tempSocket.on("ai-error", (err) => {
@@ -201,6 +254,18 @@ const Home = () => {
 
     return () => tempSocket.disconnect();
   }, []);
+
+  // Real-time UI refresh event when the AI controller makes file changes
+  useEffect(() => {
+    if (!socket) return;
+    const handleRefresh = () => {
+      fetchAssets(activeTab, searchQuery, currentFolderId);
+    };
+    socket.on("refresh-assets", handleRefresh);
+    return () => {
+      socket.off("refresh-assets", handleRefresh);
+    };
+  }, [socket, activeTab, searchQuery, currentFolderId]);
 
   // Update messages when general chat selection changes
   useEffect(() => {
@@ -745,12 +810,12 @@ const Home = () => {
           <div className="storage-section">
             <div className="storage-header">
               <span>Storage Usage</span>
-              <span>{getStorageGBUsed()} / 25 GB</span>
+              <span>{getStorageGBUsed()} / 20 GB</span>
             </div>
             <div className="storage-bar-bg">
               <div
                 className="storage-bar-fill"
-                style={{ width: `${Math.min(100, (storageBytes / (25 * 1024 * 1024 * 1024)) * 100)}%` }}
+                style={{ width: `${Math.min(100, (storageBytes / (20 * 1024 * 1024 * 1024)) * 100)}%` }}
               ></div>
             </div>
           </div>
@@ -1522,6 +1587,24 @@ const Home = () => {
             {/* General chat text box input */}
             <div className="drawer-chat-input-area">
               <div className="chat-input-box-wrapper">
+                <button
+                  className={`mic-btn ${isListening ? 'listening' : ''}`}
+                  onClick={toggleListening}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: isListening ? '#ef4444' : '#a1a1aa',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0.25rem'
+                  }}
+                  title={isListening ? "Listening... Click to stop" : "Start Voice Input"}
+                >
+                  <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+                  </svg>
+                </button>
                 <input
                   type="text"
                   className="drawer-chat-input"
@@ -1530,7 +1613,30 @@ const Home = () => {
                   onChange={(e) => dispatch(setInput(e.target.value))}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleGeneralChatSend(); }}
                   disabled={isSending}
+                  style={{ paddingLeft: '0.5rem', paddingRight: '0.5rem' }}
                 />
+                <button
+                  className="tts-toggle-btn"
+                  onClick={() => setTtsEnabled(!ttsEnabled)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: ttsEnabled ? '#7c3aed' : '#a1a1aa',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0.25rem'
+                  }}
+                  title={ttsEnabled ? "Mute Voice Feedback" : "Unmute Voice Feedback"}
+                >
+                  <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                    {ttsEnabled ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-3h2.24l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H6.75c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 014.5 12c0-.83.112-1.633.322-2.396C5.056 8.756 5.88 8.25 6.75 8.25z" />
+                    )}
+                  </svg>
+                </button>
                 <button
                   className="chat-send-btn"
                   onClick={handleGeneralChatSend}

@@ -1,5 +1,7 @@
 const assetModel = require('../models/asset.model');
 const aiService = require('../services/ai.service');
+const megaService = require('../services/mega.service');
+const userModel = require('../models/user.model');
 const fs = require('fs');
 const path = require('path');
 
@@ -58,8 +60,29 @@ async function uploadAsset(req, res) {
         const type = req.file.mimetype;
         const size = req.file.size;
         
-        // Relative path exposed statically
-        const url = `/uploads/${req.file.filename}`;
+        // Quota check
+        const userRecord = await userModel.findById(user._id);
+        if (!userRecord) {
+            return res.status(404).json({ message: "User not found" });
+        }
+        if (userRecord.usedStorage + size > userRecord.storageQuota) {
+            if (req.file.path) {
+                fs.unlink(req.file.path, () => {});
+            }
+            return res.status(403).json({ message: "Quota exceeded: You do not have enough storage space left." });
+        }
+
+        // Upload to MEGA
+        let megaHandle = "";
+        let url = "";
+        try {
+            const buffer = fs.readFileSync(req.file.path);
+            megaHandle = await megaService.uploadFile(name, size, buffer);
+            fs.unlink(req.file.path, () => {});
+        } catch (megaErr) {
+            console.warn("[MEGA] Upload failed, falling back to local storage:", megaErr.message);
+            url = `/uploads/${req.file.filename}`;
+        }
 
         const parentFolderId = req.body.parentFolderId;
 
@@ -68,10 +91,12 @@ async function uploadAsset(req, res) {
 
         const asset = await assetModel.create({
             user: user._id,
+            userId: user._id,
             name,
             type,
             size,
             url,
+            megaHandle,
             tags: analysis.tags || [],
             summary: analysis.summary || "",
             colors: analysis.colors || [],
@@ -79,6 +104,15 @@ async function uploadAsset(req, res) {
             parentFolderId: (parentFolderId && parentFolderId !== 'null' && parentFolderId !== 'undefined') ? parentFolderId : null,
             mimeType: type
         });
+
+        if (megaHandle) {
+            asset.url = `/api/assets/stream/${asset._id}`;
+            await asset.save();
+        }
+
+        // Update storage quota
+        userRecord.usedStorage += size;
+        await userRecord.save();
 
         res.status(201).json({
             message: "Asset uploaded and analyzed successfully",
@@ -95,7 +129,7 @@ async function getAssets(req, res) {
         const user = req.user;
         const { type, favorite, search, parentFolderId } = req.query;
 
-        let query = { user: user._id };
+        let query = { userId: req.user.id };
 
         if (type === 'image') {
             query.type = { $regex: '^image/', $options: 'i' };
@@ -123,15 +157,25 @@ async function getAssets(req, res) {
 
         // Auto-seed if no assets exist for this user in general (root folder)
         if (assets.length === 0 && !type && !favorite && !search && (!parentFolderId || parentFolderId === 'null' || parentFolderId === 'undefined')) {
-            const userAssetsCount = await assetModel.countDocuments({ user: user._id });
+            const userAssetsCount = await assetModel.countDocuments({ userId: req.user.id });
             if (userAssetsCount === 0) {
                 const seeded = SEED_ASSETS.map(asset => ({
                     ...asset,
                     user: user._id,
+                    userId: req.user.id,
                     parentFolderId: null,
                     mimeType: asset.type
                 }));
                 await assetModel.insertMany(seeded);
+                
+                // Add sizes of seeded assets to user's usedStorage
+                const totalSeededSize = SEED_ASSETS.reduce((sum, a) => sum + (a.size || 0), 0);
+                const userRecord = await userModel.findById(user._id);
+                if (userRecord) {
+                    userRecord.usedStorage += totalSeededSize;
+                    await userRecord.save();
+                }
+
                 assets = await assetModel.find(query).sort({ createdAt: -1 });
             }
         }
@@ -151,7 +195,7 @@ async function toggleFavorite(req, res) {
         const { id } = req.params;
         const user = req.user;
 
-        const asset = await assetModel.findOne({ _id: id, user: user._id });
+        const asset = await assetModel.findOne({ _id: id, userId: req.user.id });
         if (!asset) {
             return res.status(404).json({ message: "Asset not found" });
         }
@@ -174,13 +218,19 @@ async function deleteAsset(req, res) {
         const { id } = req.params;
         const user = req.user;
 
-        const asset = await assetModel.findOne({ _id: id, user: user._id });
+        const asset = await assetModel.findOne({ _id: id, userId: req.user.id });
         if (!asset) {
             return res.status(404).json({ message: "Asset not found" });
         }
 
-        // Delete from local disk if it's stored locally
-        if (asset.url.startsWith('/uploads/')) {
+        // Delete from MEGA if stored on MEGA
+        if (asset.megaHandle) {
+            try {
+                await megaService.deleteFile(asset.megaHandle);
+            } catch (megaErr) {
+                console.error("[MEGA] Failed to delete file:", megaErr.message);
+            }
+        } else if (asset.url.startsWith('/uploads/')) {
             const filePath = path.join(__dirname, '../../public', asset.url);
             fs.unlink(filePath, (err) => {
                 if (err) console.error("[Disk] Failed to delete file:", err.message);
@@ -188,6 +238,13 @@ async function deleteAsset(req, res) {
         }
 
         await assetModel.deleteOne({ _id: id });
+
+        // Update storage quota
+        const userRecord = await userModel.findById(user._id);
+        if (userRecord) {
+            userRecord.usedStorage = Math.max(0, userRecord.usedStorage - (asset.size || 0));
+            await userRecord.save();
+        }
 
         res.status(200).json({
             message: "Asset deleted successfully",
@@ -201,18 +258,14 @@ async function deleteAsset(req, res) {
 
 async function getStorageSummary(req, res) {
     try {
-        const user = req.user;
-
-        const result = await assetModel.aggregate([
-            { $match: { user: user._id } },
-            { $group: { _id: null, totalBytes: { $sum: "$size" } } }
-        ]);
-
-        const totalBytes = result.length > 0 ? result[0].totalBytes : 0;
-
+        const userRecord = await userModel.findById(req.user.id);
+        if (!userRecord) {
+            return res.status(404).json({ message: "User not found" });
+        }
         res.status(200).json({
             message: "Storage summary calculated successfully",
-            totalBytes
+            totalBytes: userRecord.usedStorage,
+            quotaBytes: userRecord.storageQuota
         });
     } catch (err) {
         console.error("Storage summary error:", err);
@@ -233,8 +286,8 @@ async function chatAsset(req, res) {
         const asset = await assetModel.findOne({
             _id: id,
             $or: [
-                { user: user._id },
-                { "sharedUsers.userId": user._id },
+                { userId: req.user.id },
+                { "sharedUsers.userId": req.user.id },
                 { publicLinkAccess: { $in: ['view', 'comment', 'edit'] } }
             ]
         });
@@ -284,6 +337,7 @@ async function createFolder(req, res) {
 
         const folder = await assetModel.create({
             user: user._id,
+            userId: user._id,
             name,
             type: "application/vnd.google-apps.folder",
             mimeType: "application/vnd.google-apps.folder",
@@ -303,6 +357,51 @@ async function createFolder(req, res) {
     }
 }
 
+async function streamAsset(req, res) {
+    try {
+        const { id } = req.params;
+
+        const asset = await assetModel.findOne({
+            _id: id,
+            $or: [
+                { userId: req.user.id },
+                { "sharedUsers.userId": req.user.id },
+                { publicLinkAccess: { $in: ['view', 'comment', 'edit'] } }
+            ]
+        });
+
+        if (!asset) {
+            return res.status(404).json({ message: "Asset not found or access denied" });
+        }
+
+        if (asset.megaHandle) {
+            try {
+                const stream = await megaService.getFileStream(asset.megaHandle);
+                res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(asset.name)}"`);
+                res.setHeader('Content-Type', asset.mimeType || 'application/octet-stream');
+                stream.pipe(res);
+            } catch (megaErr) {
+                console.error("[MEGA] Streaming failed:", megaErr.message);
+                res.status(500).json({ message: "Failed to stream file from cloud storage" });
+            }
+        } else if (asset.url.startsWith('/uploads/')) {
+            const filePath = path.join(__dirname, '../../public', asset.url);
+            if (fs.existsSync(filePath)) {
+                res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(asset.name)}"`);
+                res.setHeader('Content-Type', asset.mimeType || 'application/octet-stream');
+                fs.createReadStream(filePath).pipe(res);
+            } else {
+                res.status(404).json({ message: "Local file not found on disk" });
+            }
+        } else {
+            res.redirect(asset.url);
+        }
+    } catch (err) {
+        console.error("Stream Asset error:", err);
+        res.status(500).json({ message: "Internal server error" });
+    }
+}
+
 module.exports = {
     uploadAsset,
     getAssets,
@@ -310,5 +409,6 @@ module.exports = {
     deleteAsset,
     getStorageSummary,
     chatAsset,
-    createFolder
+    createFolder,
+    streamAsset
 };

@@ -6,6 +6,11 @@ const assetSchema = new mongoose.Schema({
         ref: 'user',
         required: true
     },
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'user',
+        required: true
+    },
     name: {
         type: String,
         required: true
@@ -53,6 +58,10 @@ const assetSchema = new mongoose.Schema({
         default: null
     },
     mimeType: {
+        type: String,
+        default: ""
+    },
+    megaHandle: {
         type: String,
         default: ""
     },

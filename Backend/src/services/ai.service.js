@@ -1,5 +1,7 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { HfInference } = require("@huggingface/inference");
+const assetModel = require("../models/asset.model");
+const userModel = require("../models/user.model");
 
 // Initialize Gemini
 let genAI = null;
@@ -43,8 +45,8 @@ function toGeminiHistory(contents) {
     });
 }
 
-// Generate Chat Response using Gemini
-async function generateResponse(content, folderContextString = "") {
+// Generate Chat Response using Gemini with Function Calling (Tools)
+async function generateResponse(content, folderContextString = "", context = {}) {
     try {
         if (!genAI) {
             throw new Error("Gemini API key is not configured.");
@@ -55,9 +57,46 @@ async function generateResponse(content, folderContextString = "") {
             systemInstruction += `\n\n[Active Directory Context]\nThe user is currently browsing a folder containing these files:\n${folderContextString}`;
         }
 
+        // Define tools for Sahil GPT project controller
+        const tools = [
+            {
+                functionDeclarations: [
+                    {
+                        name: "create_folder",
+                        description: "Create a new folder (directory) in the cloud drive.",
+                        parameters: {
+                            type: "OBJECT",
+                            properties: {
+                                name: { type: "STRING", description: "The folder name to create." },
+                                parentFolderId: { type: "STRING", description: "The parent folder ID (optional). If not provided, it will create in the current directory." }
+                            },
+                            required: ["name"]
+                        }
+                    },
+                    {
+                        name: "get_storage_summary",
+                        description: "Get user's storage usage details, limit, and remaining quota.",
+                        parameters: {
+                            type: "OBJECT",
+                            properties: {}
+                        }
+                    },
+                    {
+                        name: "find_unused_files",
+                        description: "Search for unused, non-favorite, or large files that can be suggested for deletion.",
+                        parameters: {
+                            type: "OBJECT",
+                            properties: {}
+                        }
+                    }
+                ]
+            }
+        ];
+
         const model = genAI.getGenerativeModel({
             model: "gemini-2.5-flash",
-            systemInstruction
+            systemInstruction,
+            tools: tools
         });
 
         const chatMessages = toGeminiHistory(content);
@@ -72,11 +111,116 @@ async function generateResponse(content, folderContextString = "") {
             history: chatMessages
         });
 
-        const result = await chat.sendMessage(latestMessage.parts[0].text);
+        let result = await chat.sendMessage(latestMessage.parts[0].text);
+        
+        // Process function calls sequentially if requested by Gemini
+        let calls = result.response.functionCalls();
+        while (calls && calls.length > 0) {
+            const functionResponses = [];
+            for (const call of calls) {
+                const toolOutput = await executeLocalTool(call.name, call.args, context);
+                functionResponses.push({
+                    functionResponse: {
+                        name: call.name,
+                        response: toolOutput
+                    }
+                });
+            }
+            result = await chat.sendMessage(functionResponses);
+            calls = result.response.functionCalls();
+        }
+
         return result.response.text();
     } catch (error) {
         console.error("[Gemini] generateResponse error:", error.message);
         return "Sorry, I encountered an issue generating a response. Please verify that your GEMINI_API_KEY is configured correctly.";
+    }
+}
+
+// Local helper to execute Gemini functions on backend Mongoose models
+async function executeLocalTool(name, args, context) {
+    const { userId, parentFolderId, socket } = context;
+    if (!userId) {
+        return { error: "User is not authenticated." };
+    }
+
+    switch (name) {
+        case "create_folder":
+            try {
+                const folderName = args.name;
+                const parentId = args.parentFolderId || parentFolderId || null;
+                const finalParentId = (parentId === 'root' || parentId === 'null' || parentId === 'undefined') ? null : parentId;
+
+                const newFolder = await assetModel.create({
+                    user: userId,
+                    userId: userId,
+                    name: folderName,
+                    type: "application/vnd.google-apps.folder",
+                    mimeType: "application/vnd.google-apps.folder",
+                    isFolder: true,
+                    parentFolderId: finalParentId,
+                    size: 0,
+                    url: ""
+                });
+
+                // Notify frontend to refresh lists in real-time
+                if (socket) {
+                    socket.emit("refresh-assets");
+                }
+
+                return {
+                    success: true,
+                    message: `Folder '${folderName}' created successfully.`,
+                    folderId: newFolder._id.toString()
+                };
+            } catch (err) {
+                return { error: `Failed to create folder: ${err.message}` };
+            }
+
+        case "get_storage_summary":
+            try {
+                const user = await userModel.findById(userId);
+                if (!user) return { error: "User not found." };
+                const usedMB = (user.usedStorage / (1024 * 1024)).toFixed(2);
+                const quotaMB = (user.storageQuota / (1024 * 1024)).toFixed(2);
+                const remainingMB = ((user.storageQuota - user.usedStorage) / (1024 * 1024)).toFixed(2);
+                
+                return {
+                    success: true,
+                    usedMB,
+                    quotaMB,
+                    remainingMB,
+                    message: `Used: ${usedMB} MB, Quota: ${quotaMB} MB, Remaining: ${remainingMB} MB.`
+                };
+            } catch (err) {
+                return { error: `Failed to retrieve storage: ${err.message}` };
+            }
+
+        case "find_unused_files":
+            try {
+                // Find up to 5 large files that are not folders and not favorites
+                const files = await assetModel.find({
+                    userId,
+                    isFolder: false,
+                    isFavorite: false
+                }).sort({ size: -1 }).limit(5).lean();
+
+                return {
+                    success: true,
+                    files: files.map(f => ({
+                        id: f._id.toString(),
+                        name: f.name,
+                        sizeMB: (f.size / (1024 * 1024)).toFixed(2),
+                        tags: f.tags,
+                        createdAt: f.createdAt
+                    }))
+                };
+            } catch (err) {
+                return { error: `Failed to scan unused files: ${err.message}` };
+            }
+
+        default:
+            return { error: `Function ${name} is not implemented.` };
     }
 }
 

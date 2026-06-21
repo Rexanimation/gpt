@@ -20,6 +20,14 @@ const userSchema = new mongoose.Schema({
     },
     password: {
         type: String,
+    },
+    usedStorage: {
+        type: Number,
+        default: 0
+    },
+    storageQuota: {
+        type: Number,
+        default: 20 * 1024 * 1024 * 1024 // 20 GB
     }
 },
     {

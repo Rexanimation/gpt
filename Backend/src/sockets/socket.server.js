@@ -65,7 +65,7 @@ function initSocketServer(httpServer) {
                 if (summarizeMatch) {
                     const fileName = summarizeMatch[1].trim();
                     const asset = await assetModel.findOne({
-                        user: userId,
+                        userId: userId,
                         name: { $regex: new RegExp('^' + fileName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '$', 'i') }
                     });
 
@@ -128,7 +128,7 @@ function initSocketServer(httpServer) {
                 let folderContextString = "";
                 if (messagePayload.folderId) {
                     const parentFolderId = (messagePayload.folderId === 'root' || messagePayload.folderId === 'null') ? null : messagePayload.folderId;
-                    const folderAssets = await assetModel.find({ user: userId, parentFolderId }).lean();
+                    const folderAssets = await assetModel.find({ userId: userId, parentFolderId }).lean();
                     if (folderAssets && folderAssets.length > 0) {
                         folderContextString = folderAssets.map(asset => `• ${asset.isFolder ? '[Folder]' : '[File]'} Name: ${asset.name}, Type: ${asset.type}, Size: ${(asset.size / (1024 * 1024)).toFixed(2)} MB, Tags: ${asset.tags.join(', ')}, Summary: ${asset.summary}`).join("\n");
                     }
@@ -197,8 +197,12 @@ function initSocketServer(httpServer) {
                     }]
                     : []   // skip if no memory yet
 
-                // 6️⃣ Generate AI response (passing folderContextString as parameter)
-                const response = await aiService.generateResponse([ ...ltm, ...stm ], folderContextString)
+                // 6️⃣ Generate AI response (passing context)
+                const response = await aiService.generateResponse(
+                    [ ...ltm, ...stm ],
+                    folderContextString,
+                    { userId, parentFolderId: messagePayload.folderId, socket }
+                )
 
                 // 7️⃣ Send response to frontend immediately
                 socket.emit("ai-response", {
