@@ -125,7 +125,7 @@ const Register = () => {
                                     type="text"
                                     className="auth-input"
                                     style={{ paddingLeft: '2.25rem' }}
-                                    placeholder="Jane"
+                                    placeholder=""
                                     value={form.firstname}
                                     onChange={handleChange}
                                     required
@@ -147,7 +147,7 @@ const Register = () => {
                                     type="text"
                                     className="auth-input"
                                     style={{ paddingLeft: '2.25rem' }}
-                                    placeholder="Doe"
+                                    placeholder=""
                                     value={form.lastname}
                                     onChange={handleChange}
                                     required
@@ -169,7 +169,7 @@ const Register = () => {
                                 name="email"
                                 type="email"
                                 className="auth-input"
-                                placeholder="name@company.com"
+                                placeholder=""
                                 value={form.email}
                                 onChange={handleChange}
                                 required
@@ -190,7 +190,7 @@ const Register = () => {
                                 name="password"
                                 type={showPassword ? "text" : "password"}
                                 className="auth-input"
-                                placeholder="Create a password"
+                                placeholder=""
                                 value={form.password}
                                 onChange={handleChange}
                                 required

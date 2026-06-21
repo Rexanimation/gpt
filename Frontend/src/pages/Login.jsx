@@ -113,7 +113,7 @@ const Login = () => {
                                 name="email"
                                 type="email"
                                 className="auth-input"
-                                placeholder="name@company.com"
+                                placeholder=""
                                 value={form.email}
                                 onChange={handleChange}
                                 required
@@ -137,7 +137,7 @@ const Login = () => {
                                 name="password"
                                 type={showPassword ? "text" : "password"}
                                 className="auth-input"
-                                placeholder="••••••••"
+                                placeholder=""
                                 value={form.password}
                                 onChange={handleChange}
                                 required
