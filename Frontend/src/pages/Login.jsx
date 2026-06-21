@@ -113,6 +113,7 @@ const Login = () => {
                                 name="email"
                                 type="email"
                                 className="auth-input"
+                                style={{ paddingLeft: '3rem' }}
                                 placeholder=""
                                 value={form.email}
                                 onChange={handleChange}
@@ -137,6 +138,7 @@ const Login = () => {
                                 name="password"
                                 type={showPassword ? "text" : "password"}
                                 className="auth-input"
+                                style={{ paddingLeft: '3rem' }}
                                 placeholder=""
                                 value={form.password}
                                 onChange={handleChange}
